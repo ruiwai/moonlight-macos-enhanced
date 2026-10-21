@@ -2195,6 +2195,19 @@ static inline NSPoint MLClampFreeMousePointToExitEdge(NSPoint point,
 }
 
 - (void)flagsChanged:(NSEvent *)event {
+    if (event.keyCode == kVK_CapsLock) {
+        BOOL state = (event.modifierFlags & NSEventModifierFlagCapsLock) != 0;
+        // Some devices report both edges with the same lock flag. Forward one tap
+        // per lock transition, including transitions that turn Caps Lock off.
+        BOOL changed = !self.capsLockStateKnown || state != self.capsLockLastState;
+        self.capsLockStateKnown = YES;
+        self.capsLockLastState = state;
+        if (changed && self.hidSupport.shouldSendInputEvents) {
+            NSEvent *press = [CapsLockKeyEvent keyPressFrom:event];
+            if (press != nil) [self onKeyboardEquivalent:press];
+        }
+        return;
+    }
     [self routeFlagsChangedToInputMethod:event];
     NSEventModifierFlags relevantModifiers = MLRelevantShortcutModifiers(event.modifierFlags);
     if ([self shouldDeferCommandModifierForShortcutHandlingWithEvent:event]) {
@@ -2919,6 +2932,9 @@ static inline NSPoint MLClampFreeMousePointToExitEdge(NSPoint point,
 
     [self disallowDisplaySleep];
 
+    // Rebase after local Caps Lock changes while another app had focus.
+    self.capsLockLastState = (CGEventSourceFlagsState(kCGEventSourceStateCombinedSessionState) & kCGEventFlagMaskAlphaShift) != 0;
+    self.capsLockStateKnown = YES;
     // Always enable input when capture is active to avoid accidental lockout
     self.hidSupport.shouldSendInputEvents = YES;
     self.controllerSupport.shouldSendInputEvents = YES;
@@ -2953,6 +2969,7 @@ static inline NSPoint MLClampFreeMousePointToExitEdge(NSPoint point,
         });
         return;
     }
+    self.capsLockStateKnown = NO;
     if (!self.isMouseCaptured && self.cursorHiddenCounter == 0 && !self.hidSupport.shouldSendInputEvents) {
         [self.hidSupport releaseAllPressedMouseButtons];
         [self.hidSupport releaseAllModifierKeys];

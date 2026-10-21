@@ -280,6 +280,8 @@ static const NSTimeInterval MLStatsOverlayRefreshIntervalSec = 0.5;
 @property (nonatomic, strong) id appDidResignActiveObserver;
 @property (nonatomic) BOOL streamViewLayoutInProgress;
 @property (nonatomic) BOOL streamControlsFrontUpdateScheduled;
+@property (nonatomic) BOOL capsLockStateKnown;
+@property (nonatomic) BOOL capsLockLastState;
 @property (nonatomic) int cursorHiddenCounter;
 @property (nonatomic) int cgCursorHiddenCounter;
 

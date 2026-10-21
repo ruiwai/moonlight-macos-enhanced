@@ -11,6 +11,19 @@ import CoreGraphics
 import SwiftUI
 
 
+// Caps Lock arrives as flagsChanged on macOS, rather than a regular keyDown.
+// Normalize it locally; do not inject events into the system or change lock state.
+@objcMembers
+final class CapsLockKeyEvent: NSObject {
+  static func keyPress(from event: NSEvent) -> NSEvent? {
+    guard event.type == .flagsChanged, event.keyCode == UInt16(kVK_CapsLock) else { return nil }
+    return NSEvent.keyEvent(
+      with: .keyDown, location: event.locationInWindow, modifierFlags: event.modifierFlags,
+      timestamp: event.timestamp, windowNumber: event.windowNumber, context: nil,
+      characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: event.keyCode)
+  }
+}
+
 @objcMembers
 final class StreamShortcut: NSObject, Codable {
   static let noKeyCode = -1
@@ -126,6 +139,7 @@ final class StreamShortcutProfile: NSObject {
     kVK_ANSI_Grave: "`",
     kVK_Space: "Space",
     kVK_Tab: "Tab",
+    kVK_CapsLock: "Caps Lock",
     kVK_Return: "Return",
     kVK_Delete: "Delete",
     kVK_ForwardDelete: "Forward Delete",
