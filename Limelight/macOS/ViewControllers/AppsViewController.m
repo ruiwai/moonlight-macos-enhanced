@@ -629,6 +629,10 @@ static NSString * const MLSunshinePerAppTopologyDefaultsPrefix = @"Moonlight.Sun
 
 - (void)prepareForSegue:(NSStoryboardSegue *)segue sender:(id)sender {
     StreamViewController *streamVC = segue.destinationController;
+    // Cached apps can retain a database snapshot without the current route.
+    if ([self.runningApp.host.uuid isEqualToString:self.host.uuid]) {
+        self.runningApp.host = self.host;
+    }
     streamVC.app = self.runningApp;
     streamVC.delegate = self;
     // Pending overrides belong to whichever app's context menu opened last;

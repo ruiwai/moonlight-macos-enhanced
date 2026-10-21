@@ -24,6 +24,7 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)setDefaultConnectionMethod:(nullable NSString *)method forHost:(NSString *)hostId;
 
 + (NSArray<NSString *> *)allEndpointsForHost:(TemporaryHost *)host;
++ (nullable NSString *)streamEndpointForHost:(TemporaryHost *)host connectionMethod:(nullable NSString *)method;
 + (NSString *)normalizedAddress:(NSString *)address;
 
 @end

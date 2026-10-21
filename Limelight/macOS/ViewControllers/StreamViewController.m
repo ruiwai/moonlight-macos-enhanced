@@ -8,6 +8,7 @@
 
 #import "StreamViewController_Internal.h"
 #import "RemoteUSBForwardingSession.h"
+#import "ConnectionEndpointStore.h"
 #include "../../../modules/controller-feedback/ControllerFeedbackEnvelope.h"
 #include "../../Input/ControllerShortcutAdapter.h"
 
@@ -1260,16 +1261,21 @@ highFreqMotor:(unsigned short)highFreqMotor {
     StreamConfiguration *streamConfig = [[StreamConfiguration alloc] init];
     streamConfig.startupBeginMs = startupBeginMs;
     
-    streamConfig.host = self.app.host.activeAddress;
     streamConfig.hostUUID = self.app.host.uuid;
     
     NSDictionary* prefs = [SettingsClass getSettingsFor:self.app.host.uuid];
     NSString *selectedConnectionMethod = nil;
     if (prefs) {
         selectedConnectionMethod = prefs[@"connectionMethod"];
-        if (selectedConnectionMethod && ![selectedConnectionMethod isEqualToString:@"Auto"]) {
-            streamConfig.host = selectedConnectionMethod;
-        }
+    }
+    streamConfig.host = [ConnectionEndpointStore streamEndpointForHost:self.app.host connectionMethod:selectedConnectionMethod];
+    if (streamConfig.host.length == 0) {
+        Log(LOG_E, @"[diag] Stream startup has no enabled endpoint for host=%@", self.app.host.uuid);
+        [self launchFailed:MLString(@"Failed to connect to PC", nil)];
+        return;
+    }
+    if (selectedConnectionMethod.length == 0 || [selectedConnectionMethod isEqualToString:@"Auto"]) {
+        self.app.host.activeAddress = streamConfig.host;
     }
     Log(LOG_I, @"[diag] Stream target selection: method=%@ active=%@ local=%@ address=%@ external=%@ ipv6=%@",
         selectedConnectionMethod ?: @"Auto",

@@ -242,6 +242,34 @@ static const NSString* HTTPS_PORT = @"47984";
     return [ordered array];
 }
 
++ (NSString *)streamEndpointForHost:(TemporaryHost *)host connectionMethod:(NSString *)method {
+    // Explicit routes must never silently fall back to a different network.
+    if (method.length > 0 && ![method isEqualToString:@"Auto"]) {
+        return method;
+    }
+
+    NSArray<NSString *> *endpoints = [self allEndpointsForHost:host];
+    NSString *active = [self normalizedAddress:host.activeAddress];
+    if ([endpoints containsObject:active] &&
+        (host.addressStates[active] == nil || host.addressStates[active].boolValue)) {
+        return active;
+    }
+    // Persisted app snapshots do not contain activeAddress. Prefer an endpoint
+    // already verified by discovery instead of attempting HTTP with a nil host.
+    for (NSString *endpoint in endpoints) {
+        if (host.addressStates[endpoint].boolValue) {
+            return endpoint;
+        }
+    }
+    // Discovery may still be starting; allow enabled routes not yet probed.
+    for (NSString *endpoint in endpoints) {
+        if (host.addressStates[endpoint] == nil) {
+            return endpoint;
+        }
+    }
+    return nil;
+}
+
 + (NSString *)normalizedAddress:(NSString *)address {
     if (![address isKindOfClass:[NSString class]]) {
         return @"";
