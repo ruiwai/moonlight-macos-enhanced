@@ -2230,10 +2230,10 @@ highFreqMotor:(unsigned short)highFreqMotor {
     [self finalizeInputDiagnosticsWithReason:[NSString stringWithFormat:@"stage-failed:%s", stageName ?: "unknown"]];
     self.streamHealthConnectionStartedMs = 0;
     [[AwdlHelperManager sharedManager] endStreamSessionWithReason:[NSString stringWithFormat:@"stage-failed:%s", stageName ?: "unknown"]];
-    if (self.streamMan) {
-        __weak typeof(self) weakSelf = self;
+    StreamManager *failedStreamManager = self.streamMan;
+    if (failedStreamManager) {
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            [weakSelf.streamMan stopStream];
+            [failedStreamManager stopStream];
         });
     }
     NSString *message = [NSString stringWithFormat:@"%s failed with error %d", stageName, errorCode];
@@ -2282,10 +2282,10 @@ highFreqMotor:(unsigned short)highFreqMotor {
     [self finalizeInputDiagnosticsWithReason:@"launch-failed"];
     self.streamHealthConnectionStartedMs = 0;
     [[AwdlHelperManager sharedManager] endStreamSessionWithReason:@"launch-failed"];
-    if (self.streamMan) {
-        __weak typeof(self) weakSelf = self;
+    StreamManager *failedStreamManager = self.streamMan;
+    if (failedStreamManager) {
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            [weakSelf.streamMan stopStream];
+            [failedStreamManager stopStream];
         });
     }
     [self closeWindowFromMainQueueWithMessage:message];

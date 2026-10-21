@@ -1,6 +1,7 @@
 """Exercise stream target selection and cached-app host rebinding without networking."""
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
@@ -141,3 +142,6 @@ with tempfile.TemporaryDirectory(prefix='moonlight-startup-endpoint-') as tmp:
     (path/'test.m').write_text(fixture)
     subprocess.run(['clang','-fobjc-arc','-framework','Foundation',str(path/'test.m'),'-o',str(path/'test')],check=True)
     subprocess.run([str(path/'test')],check=True)
+
+for script in ('retry_state.py', 'failed_cleanup.py'):
+    subprocess.run([sys.executable, str(root/'tests/startup-endpoint'/script)], check=True)

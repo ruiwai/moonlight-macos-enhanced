@@ -631,6 +631,8 @@
         [self uncaptureMouseWithCode:@"MUC303" reason:@"close-window-from-main-queue"];
 
         if (message != nil) {
+            self.reconnectInProgress = NO;
+            [self hideReconnectOverlay];
             // Show the error overlay and keep window open for retry/options
             [self showErrorOverlayWithTitle:MLString(@"Connection Failed", nil) message:message canWait:NO];
         } else {
