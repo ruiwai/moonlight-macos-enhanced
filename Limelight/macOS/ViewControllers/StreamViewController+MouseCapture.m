@@ -2195,6 +2195,7 @@ static inline NSPoint MLClampFreeMousePointToExitEdge(NSPoint point,
 }
 
 - (void)flagsChanged:(NSEvent *)event {
+    [self routeFlagsChangedToInputMethod:event];
     if (event.keyCode == kVK_CapsLock) {
         BOOL state = (event.modifierFlags & NSEventModifierFlagCapsLock) != 0;
         // Some devices report both edges with the same lock flag. Forward one tap
@@ -2208,7 +2209,6 @@ static inline NSPoint MLClampFreeMousePointToExitEdge(NSPoint point,
         }
         return;
     }
-    [self routeFlagsChangedToInputMethod:event];
     NSEventModifierFlags relevantModifiers = MLRelevantShortcutModifiers(event.modifierFlags);
     if ([self shouldDeferCommandModifierForShortcutHandlingWithEvent:event]) {
         self.deferredCommandModifierPendingForShortcutTranslation = YES;

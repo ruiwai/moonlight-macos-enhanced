@@ -901,6 +901,7 @@ private struct KeyboardTranslationRuleEditorSheet: View {
   private func installMonitor() {
     guard eventMonitor == nil else { return }
     eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
+      guard captureTarget != nil else { return event }
       if event.type == .flagsChanged {
         guard let press = CapsLockKeyEvent.keyPress(from: event) else { return event }
         return handle(press)
