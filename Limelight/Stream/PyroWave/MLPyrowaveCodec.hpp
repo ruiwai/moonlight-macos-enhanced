@@ -22,6 +22,7 @@ struct CodecSession {
 };
 
 class ValidatedCodecFrame;
+bool IsSupportedCodecSession(const CodecSession &s) noexcept;
 std::unique_ptr<const ValidatedCodecFrame> ValidateCodecFrame(
     const uint8_t *input, size_t length, const CodecSession &session,
     const MLPyrowaveFrameInfo &info);

@@ -95,13 +95,19 @@ jobs:
           xcrun clang++ -std=c++14 "${flags[@]}" -I "$common" -I "$native" \
             "$native/MLPyrowaveCodec.cpp" tests/pyrowave/test_pipeline.cpp "${objects[@]}" \
             -o "$RUNNER_TEMP/pyrowave-pipeline-tests"
+          xcrun clang++ -std=c++14 "${flags[@]}" -I "$common" -I "$native" \
+            "$native/MLPyrowaveCodec.cpp" "$native/MLPyrowaveReceiver.cpp" \
+            tests/pyrowave/test_receiver.cpp "${objects[@]}" \
+            -o "$RUNNER_TEMP/pyrowave-receiver-tests"
 
       - name: Run finite CPU composition mutation smoke (not a fuzz campaign)
         timeout-minutes: 3
         env:
           ASAN_OPTIONS: halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: '"$RUNNER_TEMP/pyrowave-pipeline-tests"'
+        run: |
+          "$RUNNER_TEMP/pyrowave-pipeline-tests"
+          "$RUNNER_TEMP/pyrowave-receiver-tests"
 
       - name: Checkout pinned CPU packetizer oracle
         uses: actions/checkout@v6

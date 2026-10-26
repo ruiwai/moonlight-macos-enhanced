@@ -43,6 +43,11 @@ static LI_PYROWAVE_REASSEMBLY_RESULT retire(
     return result; /* lastId deliberately survives every retirement. */
 }
 
+void MLPyrowaveReassemblyDiscardFrame(MLPyrowaveReassembly *ctx)
+{
+    if (ctx != NULL) (void)retire(ctx, LI_PYROWAVE_REASSEMBLY_ACCEPTED);
+}
+
 static bool sameDescriptor(const LI_PYROWAVE_PACKET_HEADER *a,
                            const LI_PYROWAVE_PACKET_HEADER *b)
 {

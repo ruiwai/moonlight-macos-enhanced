@@ -75,7 +75,8 @@ bool multiply(uint64_t a, uint64_t b, uint64_t &out)
     return true;
 }
 
-bool validSession(const CodecSession &s)
+} // namespace
+bool IsSupportedCodecSession(const CodecSession &s) noexcept
 {
     return s.width >= 2 && s.width <= 16384 && (s.width & 1) == 0 &&
         s.height >= 2 && s.height <= 16384 && (s.height & 1) == 0 &&
@@ -83,9 +84,10 @@ bool validSession(const CodecSession &s)
         s.transfer == 0 && s.transform == 0 && s.range <= 1 && s.siting <= 1;
 }
 
+namespace {
 uint64_t aligned(uint32_t dimension)
 {
-    // validSession precedes this: dimension+31 cannot overflow uint64_t.
+    // IsSupportedCodecSession precedes this: dimension+31 cannot overflow uint64_t.
     return std::max<uint64_t>(128, (uint64_t(dimension) + 31) & ~uint64_t(31));
 }
 
@@ -232,7 +234,7 @@ std::unique_ptr<const ValidatedCodecFrame> ValidateCodecFrame(
 {
     try {
         if (input == nullptr || length < 8 || length > InputLimit ||
-            !validSession(session) || info.frameId == 0 ||
+            !IsSupportedCodecSession(session) || info.frameId == 0 ||
             info.deadlineUs < info.firstReceiveUs)
             return nullptr;
         if (!sequenceMatches(input, session)) return nullptr;

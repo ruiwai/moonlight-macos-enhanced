@@ -28,6 +28,8 @@ typedef struct MLPyrowaveFrameInfo {
  */
 MLPyrowaveReassembly *MLPyrowaveReassemblyCreate(void);
 void MLPyrowaveReassemblyDestroy(MLPyrowaveReassembly *ctx);
+/* NULL-safe poison/retirement; preserves the replay watermark. */
+void MLPyrowaveReassemblyDiscardFrame(MLPyrowaveReassembly *ctx);
 LI_PYROWAVE_REASSEMBLY_RESULT MLPyrowaveReassemblyPush(
     MLPyrowaveReassembly *ctx, const uint8_t *packet, size_t size, uint64_t nowUs);
 
