@@ -450,8 +450,8 @@ static short HIDVirtualKeyForTypedCharacter(UniChar character) {
 
 @implementation HIDSupport {
     // Mac key code -> packed (VK, flags) of the key-down that is still held.
-    // Guarded by _pressedKeyPairsLock; written from key events, drained by
-    // releaseAllModifierKeys.
+    // Guarded by _pressedKeyPairsLock inside serial inputQueue blocks only.
+    // Tracks successful enqueues; failed releases remain available for cleanup.
     NSMutableDictionary<NSNumber *, NSNumber *> *_pressedKeyPairs;
     NSLock *_pressedKeyPairsLock;
     // Typed-character cache. Main thread only (Text Input Services is not
@@ -1310,39 +1310,33 @@ static unsigned short HIDPositionalKeyCode(unsigned short macKeyCode) {
         }
 
         NSNumber *macKey = @(event.keyCode);
-        uint32_t pair = 0;
-        BOOL hasPair = NO;
-        BOOL replacedHeldPair = NO;
-        uint32_t previousPair = 0;
-        [_pressedKeyPairsLock lock];
-        NSNumber *held = _pressedKeyPairs[macKey];
-        if (held != nil && event.isARepeat) {
-            // Auto-repeat keeps the pair of the original press.
-            pair = held.unsignedIntValue;
-            hasPair = YES;
-        }
-        [_pressedKeyPairsLock unlock];
-        if (!hasPair) {
-            pair = [self keyPairForMacKeyCode:event.keyCode];
-            [_pressedKeyPairsLock lock];
-            held = _pressedKeyPairs[macKey];
-            if (held != nil && held.unsignedIntValue != pair) {
-                // A key-up was missed and the pair changed since; release the old one.
-                replacedHeldPair = YES;
-                previousPair = held.unsignedIntValue;
-            }
-            _pressedKeyPairs[macKey] = @(pair);
-            [_pressedKeyPairsLock unlock];
-        }
-
-        short keyCode = HIDKeyPairKeyCode(pair);
-        char keyFlags = HIDKeyPairFlags(pair);
+        uint32_t mappedPair = [self keyPairForMacKeyCode:event.keyCode];
+        BOOL isRepeat = event.isARepeat;
         HIDDispatchInput(self, inputCtx, ^{
-            if (replacedHeldPair) {
-                LiSendKeyboardEvent2Ctx(inputCtx, HIDKeyPairKeyCode(previousPair), KEY_ACTION_UP, 0,
-                                        HIDKeyPairFlags(previousPair));
+            [_pressedKeyPairsLock lock];
+            NSNumber *held = _pressedKeyPairs[macKey];
+            // Auto-repeat keeps the pair of the original successful press.
+            uint32_t pair = held != nil && isRepeat ? held.unsignedIntValue : mappedPair;
+            if (held != nil && held.unsignedIntValue != pair) {
+                uint32_t previousPair = held.unsignedIntValue;
+                int err = LiSendKeyboardEvent2Ctx(inputCtx, HIDKeyPairKeyCode(previousPair), KEY_ACTION_UP, 0,
+                                                  HIDKeyPairFlags(previousPair));
+                if (err != 0) {
+                    [_pressedKeyPairsLock unlock];
+                    Log(LOG_W, @"[keyboard] replaced key release failed: %d", err);
+                    return;
+                }
+                [_pressedKeyPairs removeObjectForKey:macKey];
             }
-            LiSendKeyboardEvent2Ctx(inputCtx, keyCode, KEY_ACTION_DOWN, modifiers, keyFlags);
+            int err = LiSendKeyboardEvent2Ctx(inputCtx, HIDKeyPairKeyCode(pair), KEY_ACTION_DOWN, modifiers,
+                                              HIDKeyPairFlags(pair));
+            if (err == 0) {
+                _pressedKeyPairs[macKey] = @(pair);
+            }
+            [_pressedKeyPairsLock unlock];
+            if (err != 0) {
+                Log(LOG_W, @"[keyboard] key down failed: %d", err);
+            }
         });
     }
 }
@@ -1356,19 +1350,22 @@ static unsigned short HIDPositionalKeyCode(unsigned short macKeyCode) {
             return;
         }
 
-        // Release with exactly the pair the key-down used, even if the layout or
-        // the key mapping setting changed while the key was held.
         NSNumber *macKey = @(event.keyCode);
-        [_pressedKeyPairsLock lock];
-        NSNumber *held = _pressedKeyPairs[macKey];
-        [_pressedKeyPairs removeObjectForKey:macKey];
-        [_pressedKeyPairsLock unlock];
-        uint32_t pair = held != nil ? held.unsignedIntValue : [self keyPairForMacKeyCode:event.keyCode];
-
-        short keyCode = HIDKeyPairKeyCode(pair);
-        char keyFlags = HIDKeyPairFlags(pair);
+        uint32_t mappedPair = [self keyPairForMacKeyCode:event.keyCode];
         HIDDispatchInput(self, inputCtx, ^{
-            LiSendKeyboardEvent2Ctx(inputCtx, keyCode, KEY_ACTION_UP, modifiers, keyFlags);
+            [_pressedKeyPairsLock lock];
+            // Use the queued down's pair even if the mapping changed meanwhile.
+            NSNumber *held = _pressedKeyPairs[macKey];
+            uint32_t pair = held != nil ? held.unsignedIntValue : mappedPair;
+            int err = LiSendKeyboardEvent2Ctx(inputCtx, HIDKeyPairKeyCode(pair), KEY_ACTION_UP, modifiers,
+                                              HIDKeyPairFlags(pair));
+            if (err == 0) {
+                [_pressedKeyPairs removeObjectForKey:macKey];
+            }
+            [_pressedKeyPairsLock unlock];
+            if (err != 0) {
+                Log(LOG_W, @"[keyboard] key up failed: %d", err);
+            }
         });
     }
 }
@@ -1420,21 +1417,26 @@ static unsigned short HIDPositionalKeyCode(unsigned short macKeyCode) {
     self.keyboardRemoteModifierMask = 0;
     self.keyboardDeferredShortcutTranslationCommandMask = 0;
 
-    // Non-modifier keys still held are released with the exact (VK, flags) pair
-    // their key-down used, so a typed-character key cannot stay stuck on the host.
-    [_pressedKeyPairsLock lock];
-    NSArray<NSNumber *> *heldPairs = _pressedKeyPairs.allValues;
-    [_pressedKeyPairs removeAllObjects];
-    [_pressedKeyPairsLock unlock];
-
     PML_INPUT_STREAM_CONTEXT inputCtx = HIDInputContext(self);
     if (!inputCtx) {
         return;
     }
     HIDDispatchInput(self, inputCtx, ^{
-        for (NSNumber *heldPair in heldPairs) {
-            uint32_t pair = heldPair.unsignedIntValue;
-            LiSendKeyboardEvent2Ctx(inputCtx, HIDKeyPairKeyCode(pair), KEY_ACTION_UP, 0, HIDKeyPairFlags(pair));
+        // Snapshot after preceding queued presses; retain failed releases for retry.
+        [_pressedKeyPairsLock lock];
+        NSDictionary<NSNumber *, NSNumber *> *heldPairs = [_pressedKeyPairs copy];
+        [_pressedKeyPairsLock unlock];
+        for (NSNumber *macKey in heldPairs) {
+            uint32_t pair = heldPairs[macKey].unsignedIntValue;
+            [_pressedKeyPairsLock lock];
+            int err = LiSendKeyboardEvent2Ctx(inputCtx, HIDKeyPairKeyCode(pair), KEY_ACTION_UP, 0, HIDKeyPairFlags(pair));
+            if (err == 0) {
+                [_pressedKeyPairs removeObjectForKey:macKey];
+            }
+            [_pressedKeyPairsLock unlock];
+            if (err != 0) {
+                Log(LOG_W, @"[keyboard] cleanup key release failed: %d", err);
+            }
         }
         LiSendKeyboardEventCtx(inputCtx, 0x5B, KEY_ACTION_UP, 0);
         LiSendKeyboardEventCtx(inputCtx, 0x5C, KEY_ACTION_UP, 0);

@@ -9,7 +9,7 @@ submodules and the application build are not needed.
 
 ## Dependency boundary
 
-- Native Common: `3ccd50806d2bb0446db61b88501b6f7609daa89d`
+- Native Common: `77bd732ff3d8b034f1fc6937e89ac0585d83fa0d`
   (`moonlight-common/moonlight-common-c`).
 - Foundation Common: `ddd52e20252ac2e27b4137b6db24530cf96fdfbb`.
 

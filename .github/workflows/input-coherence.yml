@@ -1,0 +1,58 @@
+name: Input coherence
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  input-coherence:
+    runs-on: macos-15
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+
+      - name: Initialize pinned Common and only its ENet dependency
+        run: |
+          common=moonlight-common/moonlight-common-c
+          git -c submodule.recurse=false submodule update --init --checkout -- "$common"
+          git -C "$common" -c submodule.recurse=false submodule update --init --checkout -- enet
+
+      - name: Select Xcode 26.3
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+          xcode=$(xcodebuild -version | sed -n '1p')
+          [ "$xcode" = 'Xcode 26.3' ] || { echo "::error::Expected Xcode 26.3, got $xcode" >&2; exit 1; }
+          sdk=$(xcrun --sdk macosx --show-sdk-version)
+          [ "${sdk%%.*}" -ge 26 ] || { echo "::error::Expected macOS SDK major >=26, got $sdk" >&2; exit 1; }
+
+      - name: Ensure OpenSSL is available
+        run: |
+          if ! brew list --versions openssl@3 >/dev/null; then
+            brew install openssl@3
+          fi
+
+      - name: Configure and build Common Debug tests
+        run: |
+          cmake -S moonlight-common/moonlight-common-c -B "$RUNNER_TEMP/input-coherence" \
+            -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
+          cmake --build "$RUNNER_TEMP/input-coherence" -j4
+
+      - name: Run Common and native input checks
+        run: |
+          ctest --test-dir "$RUNNER_TEMP/input-coherence" --output-on-failure
+          python3 tests/input-coherence/check_native_wiring.py
+          python3 tests/input-coherence/keyboard.py
+          python3 tests/window-cleanup/shared_input.py

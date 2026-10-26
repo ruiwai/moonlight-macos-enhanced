@@ -144,13 +144,19 @@ static inline BOOL HIDPhysicalWheelModePrefersHighPrecision(HIDPhysicalWheelMode
         dispatchedAmount = clicks > 0 ? 1 : -1;
     }
 
-    LiNoteScrollTraceLocalDispatchCtx(inputCtx,
-                                      traceId,
-                                      nowMs,
-                                      dispatchedAmount,
-                                      false,
-                                      false);
-    LiSendHighResScrollEventCtx(inputCtx, dispatchedAmount);
+    const short dispatchAmount = dispatchedAmount;
+    HIDDispatchInput(self, inputCtx, ^{
+        LiNoteScrollTraceLocalDispatchCtx(inputCtx,
+                                          traceId,
+                                          nowMs,
+                                          dispatchAmount,
+                                          false,
+                                          false);
+        int err = LiSendHighResScrollEventCtx(inputCtx, dispatchAmount);
+        if (err != 0) {
+            Log(LOG_W, @"[gcMouse] scroll send failed: %d", err);
+        }
+    });
     [SettingsClass updateScrollInputRuntimeStatusFor:self.host.uuid
                                           summaryKey:@"Scroll Runtime Path GameController"
                                            detailKey:@"Scroll Runtime Detail GameController"];
@@ -464,21 +470,25 @@ static inline BOOL HIDPhysicalWheelModePrefersHighPrecision(HIDPhysicalWheelMode
         if (!HIDValidateInputContext(inputCtx, "scrollWheel")) {
             return;
         }
-        BOOL dispatchHorizontal = dispatchedDeltaX != 0;
-        short dispatchAmount = dispatchHorizontal ? dispatchedDeltaX : dispatchedDeltaY;
-        BOOL dispatchHighRes = highResolutionPath && !quantizedWheel;
+        const BOOL dispatchHorizontal = dispatchedDeltaX != 0;
+        const short dispatchAmount = dispatchHorizontal ? dispatchedDeltaX : dispatchedDeltaY;
+        const BOOL dispatchHighRes = highResolutionPath && !quantizedWheel;
         if (dispatchAmount != 0) {
-            LiNoteScrollTraceLocalDispatchCtx(inputCtx,
-                                              traceId,
-                                              LiGetMillis(),
-                                              dispatchAmount,
-                                              dispatchHighRes,
-                                              dispatchHorizontal);
-        }
-        if (dispatchedDeltaX != 0) {
-            LiSendHighResHScrollEventCtx(inputCtx, dispatchedDeltaX);
-        } else if (dispatchedDeltaY != 0) {
-            LiSendHighResScrollEventCtx(inputCtx, dispatchedDeltaY);
+            const uint64_t dispatchTimeMs = LiGetMillis();
+            HIDDispatchInput(self, inputCtx, ^{
+                LiNoteScrollTraceLocalDispatchCtx(inputCtx,
+                                                  traceId,
+                                                  dispatchTimeMs,
+                                                  dispatchAmount,
+                                                  dispatchHighRes,
+                                                  dispatchHorizontal);
+                int err = dispatchHorizontal
+                    ? LiSendHighResHScrollEventCtx(inputCtx, dispatchAmount)
+                    : LiSendHighResScrollEventCtx(inputCtx, dispatchAmount);
+                if (err != 0) {
+                    Log(LOG_W, @"[appkit] scroll send failed: %d", err);
+                }
+            });
         }
     }
 

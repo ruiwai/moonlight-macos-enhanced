@@ -459,7 +459,12 @@ static inline double HIDBlendFreeMouseGain(double currentGain, double rawDelta, 
                     if (!inputCtx) {
                         return;
                     }
-                    LiSendMouseButtonEventCtx(inputCtx, pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+                    HIDDispatchInput(self, inputCtx, ^{
+                        int err = LiSendMouseButtonEventCtx(inputCtx, pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+                        if (err != 0) {
+                            Log(LOG_W, @"[gcMouse] button left send failed: %d", err);
+                        }
+                    });
                 }
             };
             mouse.mouseInput.middleButton.pressedChangedHandler = ^(GCControllerButtonInput * _Nonnull button, float value, BOOL pressed) {
@@ -468,7 +473,12 @@ static inline double HIDBlendFreeMouseGain(double currentGain, double rawDelta, 
                     if (!inputCtx) {
                         return;
                     }
-                    LiSendMouseButtonEventCtx(inputCtx, pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_MIDDLE);
+                    HIDDispatchInput(self, inputCtx, ^{
+                        int err = LiSendMouseButtonEventCtx(inputCtx, pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_MIDDLE);
+                        if (err != 0) {
+                            Log(LOG_W, @"[gcMouse] button middle send failed: %d", err);
+                        }
+                    });
                 }
             };
             mouse.mouseInput.rightButton.pressedChangedHandler = ^(GCControllerButtonInput * _Nonnull button, float value, BOOL pressed) {
@@ -480,7 +490,12 @@ static inline double HIDBlendFreeMouseGain(double currentGain, double rawDelta, 
                     if (!inputCtx) {
                         return;
                     }
-                    LiSendMouseButtonEventCtx(inputCtx, pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+                    HIDDispatchInput(self, inputCtx, ^{
+                        int err = LiSendMouseButtonEventCtx(inputCtx, pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+                        if (err != 0) {
+                            Log(LOG_W, @"[gcMouse] button right send failed: %d", err);
+                        }
+                    });
                 }
             };
         
@@ -490,7 +505,12 @@ static inline double HIDBlendFreeMouseGain(double currentGain, double rawDelta, 
                     if (!inputCtx) {
                         return;
                     }
-                    LiSendMouseButtonEventCtx(inputCtx, pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_X1);
+                    HIDDispatchInput(self, inputCtx, ^{
+                        int err = LiSendMouseButtonEventCtx(inputCtx, pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_X1);
+                        if (err != 0) {
+                            Log(LOG_W, @"[gcMouse] button x1 send failed: %d", err);
+                        }
+                    });
                 }
             };
             mouse.mouseInput.auxiliaryButtons[1].pressedChangedHandler = ^(GCControllerButtonInput * _Nonnull button, float value, BOOL pressed) {
@@ -499,7 +519,12 @@ static inline double HIDBlendFreeMouseGain(double currentGain, double rawDelta, 
                     if (!inputCtx) {
                         return;
                     }
-                    LiSendMouseButtonEventCtx(inputCtx, pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_X2);
+                    HIDDispatchInput(self, inputCtx, ^{
+                        int err = LiSendMouseButtonEventCtx(inputCtx, pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_X2);
+                        if (err != 0) {
+                            Log(LOG_W, @"[gcMouse] button x2 send failed: %d", err);
+                        }
+                    });
                 }
             };
         } else {
