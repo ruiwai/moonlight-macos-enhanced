@@ -28,7 +28,7 @@ jobs:
           git -c submodule.recurse=false submodule update --init --checkout -- \
             moonlight-common/moonlight-common-c
 
-      - name: Compile Common goldens and metadata checks with sanitizers
+      - name: Compile Common goldens and native checks with sanitizers
         run: |
           common=moonlight-common/moonlight-common-c
           # Match Common CMake's C11, src includes, and warning flags.
@@ -48,8 +48,14 @@ jobs:
             tests/pyrowave/test_metadata.c \
             Limelight/Stream/PyroWave/MLPyrowaveMetadata.c \
             -o "$RUNNER_TEMP/pyrowave-metadata-tests"
+          xcrun clang "${flags[@]}" -I "$common/src" -I Limelight/Stream/PyroWave \
+            tests/pyrowave/test_reassembly.c \
+            Limelight/Stream/PyroWave/MLPyrowaveReassembly.c \
+            Limelight/Stream/PyroWave/MLPyrowaveMetadata.c \
+            "$common/src/PyrowaveProtocol.c" "$common/src/PyrowaveReassembly.c" \
+            -o "$RUNNER_TEMP/pyrowave-strict-reassembly-tests"
 
-      - name: Run Common goldens and metadata checks
+      - name: Run Common goldens and native checks
         env:
           ASAN_OPTIONS: halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
@@ -57,3 +63,4 @@ jobs:
           "$RUNNER_TEMP/pyrowave-protocol-golden-tests"
           "$RUNNER_TEMP/pyrowave-reassembly-golden-tests"
           "$RUNNER_TEMP/pyrowave-metadata-tests"
+          "$RUNNER_TEMP/pyrowave-strict-reassembly-tests"
