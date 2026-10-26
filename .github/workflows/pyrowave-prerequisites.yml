@@ -64,3 +64,16 @@ jobs:
           "$RUNNER_TEMP/pyrowave-reassembly-golden-tests"
           "$RUNNER_TEMP/pyrowave-metadata-tests"
           "$RUNNER_TEMP/pyrowave-strict-reassembly-tests"
+
+      - name: Compile and run standalone codec checks with fatal sanitizers
+        env:
+          ASAN_OPTIONS: halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          flags=(-std=c++14 -Wall -Wextra -Werror -g -O1
+                 '-fsanitize=address,undefined' -fno-omit-frame-pointer)
+          xcrun clang++ "${flags[@]}" \
+            -I moonlight-common/moonlight-common-c/src -I Limelight/Stream/PyroWave \
+            Limelight/Stream/PyroWave/MLPyrowaveCodec.cpp tests/pyrowave/test_codec.cpp \
+            -o "$RUNNER_TEMP/pyrowave-codec-tests"
+          "$RUNNER_TEMP/pyrowave-codec-tests"

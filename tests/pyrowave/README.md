@@ -53,9 +53,9 @@ until the updated workflow runs; local lint is not compilation/test evidence.
 
 ## Next prerequisites
 
-Codec parser/decoder hardening with malformed and real encoder fixtures remains
-pending before application/GPU integration or enablement. Copied codec bytes are
-not codec-validated: they still require a codec validator, not immediate decoding.
+The standalone codec validator below is available for explicit CPU use only.
+Pinned encoder/packetizer fixtures and decoder hardening remain pending before
+application/GPU integration or enablement; reassembly does not call this validator.
 
 ## Strict reassembly /v1 boundary and requirement map
 
@@ -91,7 +91,7 @@ Map from [protocol contract](../../docs/pyrowave-protocol-contract.md) requireme
 - Protected metadata: `testMetadata` covers cross-block recovery, untrusted header
   copy, valid/invalid metadata, zero outputs/unchanged sentinel bytes on failure,
   replay and no carryover; `test_metadata.c` covers TLV flags/length/type/max rules.
-- Signal/color, codec parser, real encoder compatibility, negotiation and GPU
+- Negotiation, real encoder compatibility, codec decoding, and GPU
   lifetime/validation remain pending; synthetic fixtures prove none of these.
 Allocation failures are handled but not fault-injected/tested; CI execution is pending. Local lint is not test execution.
 
@@ -101,3 +101,37 @@ golden tests locally:
 ```sh
 nix shell nixpkgs#actionlint -c actionlint .github/workflows/pyrowave-prerequisites.yml
 ```
+
+## Codec /v1 (synthetic only)
+
+`MLPyrowaveCodec.hpp/.cpp` defines an independent C++14 CPU transaction, not the
+upstream unsafe parser or a Metal ABI. CI links only that cpp and `test_codec.cpp`,
+using Common `src` and native PyroWave includes for reassembly scalar types; no C
+functions are referenced. The same fatal-sanitizer step compiles with `xcrun
+clang++ -std=c++14 -Wall -Wextra -Werror -g -O1 -fsanitize=address,undefined
+-fno-omit-frame-pointer` and runs it. No Xcode, GPU, or streaming wiring is added.
+
+Only even 2..16384 SDR709/8-bit/420 sessions are supported; wire range full/limited
+and siting center/left must match. Input is 8 bytes..16 MiB. Five-level aligned
+layout capacity is preflighted with checked uint64 arithmetic before allocation.
+Input+16 zero guards +4*capacity offsets +2*capacity temporary masks + fixed
+object/1024-byte bookkeeping allowance must fit 32 MiB (requests, not process RSS).
+Offsets are BYTE offsets to unique record headers; UINT32_MAX is absent. Guard
+bytes are initialized, but shader read safety is not certified. The immutable
+result copies the full input and envelope ID/timestamp/timing/metadata; failures
+publish nothing. No clock comparison is performed; callers own expiry decisions.
+
+Synthetic CHECK fixtures cover sparse/zero counts, ownership, both ranges/sitings,
+2/128/130 and CPU-only maximum dimensions, sequence/color/session conflicts,
+duplicate identity and zero-word termination, geometry, control/plane/sign bounds,
+quant167/168/200, excess/truncated/trailing bytes, input preflight, and atomic failure.
+Quant <=167 is an explicit pinned encoder-domain policy; zero control with nonzero
+q low nibble rejects the dequant/offset-scan ambiguity. Unused sign/padding values
+are ignored, but duplicate records must match every byte. Full-layout coverage is
+not required: unique transmitted count must equal the sequence's declared count.
+
+Algorithm provenance: Foundation codec `cc91cbf6363721d19d135d05ca8e3d8665ea6afd`,
+MIT AND GPL-3.0-only; notices are retained in the new source. A pinned packetizer
+oracle is pending the next slice. These synthetic checks do NOT establish encoder
+conformance, pixel accuracy, GPU validity, interoperability, or feature readiness.
+CI execution is pending; local evidence is lint only, not compilation or test runs.
