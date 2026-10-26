@@ -78,6 +78,31 @@ jobs:
             -o "$RUNNER_TEMP/pyrowave-codec-tests"
           "$RUNNER_TEMP/pyrowave-codec-tests"
 
+      - name: Compile CPU composition smoke with C11 and C++14 sanitizers
+        run: |
+          common=moonlight-common/moonlight-common-c/src
+          native=Limelight/Stream/PyroWave
+          flags=(-Wall -Wextra -Werror -g -O1
+                 '-fsanitize=address,undefined' -fno-omit-frame-pointer)
+          sources=("$common/PyrowaveProtocol.c" "$common/PyrowaveReassembly.c"
+                   "$native/MLPyrowaveMetadata.c" "$native/MLPyrowaveReassembly.c")
+          objects=()
+          for source in "${sources[@]}"; do
+            object="$RUNNER_TEMP/$(basename "${source%.c}")-pipeline.o"
+            xcrun clang -std=c11 "${flags[@]}" -I "$common" -I "$native" -c "$source" -o "$object"
+            objects+=("$object")
+          done
+          xcrun clang++ -std=c++14 "${flags[@]}" -I "$common" -I "$native" \
+            "$native/MLPyrowaveCodec.cpp" tests/pyrowave/test_pipeline.cpp "${objects[@]}" \
+            -o "$RUNNER_TEMP/pyrowave-pipeline-tests"
+
+      - name: Run finite CPU composition mutation smoke (not a fuzz campaign)
+        timeout-minutes: 3
+        env:
+          ASAN_OPTIONS: halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: '"$RUNNER_TEMP/pyrowave-pipeline-tests"'
+
       - name: Checkout pinned CPU packetizer oracle
         uses: actions/checkout@v6
         with:

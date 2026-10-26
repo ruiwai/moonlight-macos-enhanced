@@ -1,7 +1,7 @@
 // Copyright (c) 2025 Hans-Kristian Arntzen
 // Copyright (c) 2026 AlkaidLab contributors
 // SPDX-License-Identifier: MIT AND GPL-3.0-only
-// Synthetic LE fixtures only; no pinned encoder/packetizer oracle yet.
+// Synthetic LE fixtures only; pinned CPU packetizer oracle is in test_packetizer.cpp.
 #include "MLPyrowaveCodec.hpp"
 #include <algorithm>
 #include <cstdio>

@@ -48,8 +48,8 @@ HDR10+/Vivid/Dolby Vision/HLG peak entries always reject in this SDR-only slice.
 Synthetic byte fixtures cover null/empty/reset, unaligned reads, latency extrema,
 all truncated prefixes, bad lengths/flags, required/unknown/dynamic policy,
 duplicates and atomic failure after valid latency, and the 65535-byte boundary.
-They make no real encoder provenance claim. Execution is CI-only and pending
-until the updated workflow runs; local lint is not compilation/test evidence.
+They make no real encoder provenance claim. CI execution passed in run
+40331107419; local lint is not compilation/test evidence.
 
 ## Next prerequisites
 
@@ -91,9 +91,13 @@ Map from [protocol contract](../../docs/pyrowave-protocol-contract.md) requireme
 - Protected metadata: `testMetadata` covers cross-block recovery, untrusted header
   copy, valid/invalid metadata, zero outputs/unchanged sentinel bytes on failure,
   replay and no carryover; `test_metadata.c` covers TLV flags/length/type/max rules.
+- Composite/fuzz progress: `test_pipeline.cpp` adds CPU composition and finite
+  deterministic parser/wire mutation smoke (execution pending); a coverage-guided
+  fuzz campaign and real encoder/GPU acceptance remain unfulfilled requirements.
 - Negotiation, real encoder compatibility, codec decoding, and GPU
   lifetime/validation remain pending; synthetic fixtures prove none of these.
-Allocation failures are handled but not fault-injected/tested; CI execution is pending. Local lint is not test execution.
+Allocation failures are handled but not fault-injected/tested; reassembly CI passed
+in run 40334474521. Local lint is not test execution.
 
 Local validation for this candidate is lint only; do not build or execute the
 golden tests locally:
@@ -133,7 +137,7 @@ not required: unique transmitted count must equal the sequence's declared count.
 Algorithm provenance: Foundation codec `cc91cbf6363721d19d135d05ca8e3d8665ea6afd`,
 MIT AND GPL-3.0-only; notices are retained in the new source. These synthetic checks do NOT establish encoder
 conformance, pixel accuracy, GPU validity, interoperability, or feature readiness.
-CI execution is pending; local evidence is lint only, not compilation or test runs.
+Codec CI passed in run 40337167846; local evidence remains lint only.
 
 ## Pinned CPU packetizer oracle /v1
 
@@ -161,9 +165,37 @@ mapping geometry in 2/130/1920 layouts accepts its full legal ballot, with poole
 signs, and rejects a structurally complete outside-bit record where one exists
 (full4x4 has none). Literal mutations reject dimensions/count/code/sequence,
 truncation and conflicting duplicates; nonzero unused padding remains legal.
-Snapshot output is produced/compared only on macOS execution, which is pending
-until CI runs; no local generation, compilation or test execution is claimed.
+Snapshot output is produced/compared only on macOS execution; oracle run
+40339618731 passed. No local generation, compilation or execution is claimed.
 Local evidence is selected actionlint and exhaustive cppcheck on the new test.
 This is a pinned CPU serialization/layout oracle, not real GPU-encoded corpus,
 pixel decoding, transport interoperability, shader safety or feature readiness.
 Real GPU-encoded corpus and GPU validation remain deferred.
+
+## CPU composition /v1 (execution pending)
+
+Observed prerequisite CI runs: baseline Common goldens 40329294718, metadata
+40331107419, strict reassembly 40334474521, codec 40337167846, and pinned CPU
+packetizer oracle 40339618731 all passed. These are not execution evidence for
+the new composition test, which remains pending.
+
+`test_pipeline.cpp` links actual Common protocol/reassembly, native metadata/
+reassembly C11 objects and the C++14 codec, without mocks, upstream headers, GPU,
+Xcode or live wiring. The synthetic fixed 128x128 sequence5/index0 literal matches
+`test_packetizer.cpp`'s pinned CPU sparse golden, not a captured encoder frame.
+A protected optional HOST_LATENCY TLV plus codec gives 34 protected bytes; padded
+B16/N3 DATA and XOR parity recover a missing metadata/codec boundary shard without
+FRAME_HEADER. Checks cover publication gating, exact bytes/offsets/guards, full
+identity/timing/session/latency, ownership after destruction, two losses, expiry,
+invalid codec versus invalid metadata, newer recovery and successful no carryover.
+
+A fixed-seed in-test PRNG drives 1024 codec/TLV cases (inputs <=128 bytes) and
+256 fresh-context wire cases using valid seeds, bit mutations, truncation and
+trailing bytes. Accepted results must own exact bytes; failures publish nothing,
+and inputs remain unchanged. Packet/output buffers are fixed <=256 bytes;
+production allocation caps still bound mutated geometry. CI compiles C and C++
+separately with strict warnings/ASan/UBSan, then runs in a fatal-sanitizer step
+limited to 3 minutes inside the 10-minute job. Execution is pending: local checks
+are selected actionlint and exhaustive C++14 cppcheck only. This is finite smoke,
+not coverage-guided fuzzing, a fuzz proof, transport interoperability, pixel/GPU
+validation, or permission to enable PyroWave.
