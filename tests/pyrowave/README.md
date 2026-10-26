@@ -54,7 +54,7 @@ until the updated workflow runs; local lint is not compilation/test evidence.
 ## Next prerequisites
 
 The standalone codec validator below is available for explicit CPU use only.
-Pinned encoder/packetizer fixtures and decoder hardening remain pending before
+Real GPU-encoded fixtures and decoder hardening remain pending before
 application/GPU integration or enablement; reassembly does not call this validator.
 
 ## Strict reassembly /v1 boundary and requirement map
@@ -131,7 +131,39 @@ are ignored, but duplicate records must match every byte. Full-layout coverage i
 not required: unique transmitted count must equal the sequence's declared count.
 
 Algorithm provenance: Foundation codec `cc91cbf6363721d19d135d05ca8e3d8665ea6afd`,
-MIT AND GPL-3.0-only; notices are retained in the new source. A pinned packetizer
-oracle is pending the next slice. These synthetic checks do NOT establish encoder
+MIT AND GPL-3.0-only; notices are retained in the new source. These synthetic checks do NOT establish encoder
 conformance, pixel accuracy, GPU validity, interoperability, or feature readiness.
 CI execution is pending; local evidence is lint only, not compilation or test runs.
+
+## Pinned CPU packetizer oracle /v1
+
+`test_packetizer.cpp` uses AlkaidLab/pyrowave (Foundation codec pin):
+`cc91cbf6363721d19d135d05ca8e3d8665ea6afd`.
+CI checks out `.ci-pyrowave-codec` without submodules or credentials persistence
+and asserts HEAD before compiling. Only upstream `metal/pyrowave_bitstream.cpp`
+is compiled separately with C++14, `-Wall -Wextra` and the same sanitizers (no
+`-Werror` for existing upstream warnings). Native validator/test compilation keeps
+`-Werror`; linking adds only that upstream object. Fatal sanitizer execution stays
+in the same macOS job. No CMake, nested dependencies, GPU/Metal/Vulkan calls,
+unsafe `BitstreamParser` calls, or application integration are involved.
+
+Hand-authored coefficient records exercise exact pinned `BlockLayout::init`,
+`compute_num_packets` and `packetize` CPU serialization, NOT GPU generation.
+Independent literal zero/sparse 128x128 goldens check exact output bytes;
+metadata initializes every slot, uses word offsets and provides a readable aligned
+sequence5 dummy header even at zero count. Packet offsets/sizes/exhaustion and
+boundary16/24 split/concatenate cover separated sparse slots including the last.
+These packets are not PYRF frames; only complete pure bytes reach the validator.
+Checks cover owned byte identity, full envelope identity/timing/latency, byte-offset
+tables/absent slots, zero guards, and capacities51/51/93/3261/393216 for
+2x2/128x128/130x130/1920x1080/16384x16384 sequence-only frames. Each distinct
+mapping geometry in 2/130/1920 layouts accepts its full legal ballot, with pooled
+signs, and rejects a structurally complete outside-bit record where one exists
+(full4x4 has none). Literal mutations reject dimensions/count/code/sequence,
+truncation and conflicting duplicates; nonzero unused padding remains legal.
+Snapshot output is produced/compared only on macOS execution, which is pending
+until CI runs; no local generation, compilation or test execution is claimed.
+Local evidence is selected actionlint and exhaustive cppcheck on the new test.
+This is a pinned CPU serialization/layout oracle, not real GPU-encoded corpus,
+pixel decoding, transport interoperability, shader safety or feature readiness.
+Real GPU-encoded corpus and GPU validation remain deferred.

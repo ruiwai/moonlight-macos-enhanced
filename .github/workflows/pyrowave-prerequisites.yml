@@ -77,3 +77,32 @@ jobs:
             Limelight/Stream/PyroWave/MLPyrowaveCodec.cpp tests/pyrowave/test_codec.cpp \
             -o "$RUNNER_TEMP/pyrowave-codec-tests"
           "$RUNNER_TEMP/pyrowave-codec-tests"
+
+      - name: Checkout pinned CPU packetizer oracle
+        uses: actions/checkout@v6
+        with:
+          repository: AlkaidLab/pyrowave
+          ref: cc91cbf6363721d19d135d05ca8e3d8665ea6afd
+          path: .ci-pyrowave-codec
+          submodules: false
+          persist-credentials: false
+
+      - name: Compile and run pinned CPU packetizer oracle with fatal sanitizers
+        env:
+          ASAN_OPTIONS: halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          test "$(git -C .ci-pyrowave-codec rev-parse HEAD)" = \
+            cc91cbf6363721d19d135d05ca8e3d8665ea6afd
+          flags=(-std=c++14 -Wall -Wextra -g -O1
+                 '-fsanitize=address,undefined' -fno-omit-frame-pointer)
+          # Upstream has existing warnings; isolate it without -Werror.
+          xcrun clang++ "${flags[@]}" -I .ci-pyrowave-codec/metal -c \
+            .ci-pyrowave-codec/metal/pyrowave_bitstream.cpp \
+            -o "$RUNNER_TEMP/pyrowave-bitstream.o"
+          xcrun clang++ "${flags[@]}" -Werror \
+            -I .ci-pyrowave-codec/metal \
+            -I moonlight-common/moonlight-common-c/src -I Limelight/Stream/PyroWave \
+            Limelight/Stream/PyroWave/MLPyrowaveCodec.cpp tests/pyrowave/test_packetizer.cpp \
+            "$RUNNER_TEMP/pyrowave-bitstream.o" -o "$RUNNER_TEMP/pyrowave-packetizer-tests"
+          "$RUNNER_TEMP/pyrowave-packetizer-tests"
