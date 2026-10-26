@@ -11,24 +11,14 @@ on:
 
 jobs:
   build_arch:
-    name: Build ${{ matrix.variant }}
-    runs-on: ${{ matrix.runner }}
+    name: Build arm64
+    runs-on: macos-15
     env:
       # The EdDSA public key is safe to publish. Keep a repository fallback so
       # a missing optional secret cannot silently disable Sparkle in release
       # artifacts. The private signing key remains outside Git.
       SPARKLE_ED_PUBLIC_KEY: ${{ secrets.SPARKLE_ED_PUBLIC_KEY || '0oUtFGXxgldrfua5x34b0mT6RvUQ6eI+xCJiddymRX4=' }}
       SPARKLE_FEED_URL: https://github.com/skyhua0224/moonlight-macos-enhanced/releases/latest/download/appcast.xml
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - variant: arm64
-            runner: macos-15
-            destination: 'platform=macOS,arch=arm64'
-            archs: 'arm64'
-            display_name: Apple Silicon
 
     steps:
     - name: Checkout
@@ -87,14 +77,14 @@ jobs:
           echo "RELEASE_BUILD_NUMBER=$((1335 + GITHUB_RUN_NUMBER))"
         } >> "$GITHUB_ENV"
 
-    - name: Build ${{ matrix.display_name }} package
+    - name: Build Apple Silicon package
       run: |
         xcodebuild -project Moonlight.xcodeproj \
           -scheme "Moonlight for macOS" \
           -configuration Release \
           -derivedDataPath build \
-          -destination "${{ matrix.destination }}" \
-          ARCHS="${{ matrix.archs }}" \
+          -destination "platform=macOS,arch=arm64" \
+          ARCHS="arm64" \
           ONLY_ACTIVE_ARCH=YES \
           CODE_SIGN_IDENTITY="-" \
           CODE_SIGNING_REQUIRED=NO \
@@ -107,7 +97,7 @@ jobs:
           SPARKLE_FEED_URL="$SPARKLE_FEED_URL" \
           build
 
-    - name: Verify ${{ matrix.variant }} binary slices
+    - name: Verify arm64 binary slices
       run: |
         main_binary="build/Build/Products/Release/MoonlightEnhanced.app/Contents/MacOS/MoonlightEnhanced"
         helper_binary="build/Build/Products/Release/MoonlightEnhanced.app/Contents/Library/LaunchServices/std.skyhua.MoonlightMacEnhanced.AwdlPrivilegedHelper"
@@ -128,33 +118,33 @@ jobs:
         echo "Main binary architectures: $main_archs"
         echo "Helper binary architectures: $helper_archs"
 
-        if [[ "$main_archs" != *"${{ matrix.archs }}"* ]]; then
-          echo "Main binary missing expected architecture ${{ matrix.archs }}"
+        if [[ "$main_archs" != *"arm64"* ]]; then
+          echo "Main binary missing expected architecture arm64"
           exit 1
         fi
 
-        if [[ "$helper_archs" != *"${{ matrix.archs }}"* ]]; then
-          echo "Helper binary missing expected architecture ${{ matrix.archs }}"
+        if [[ "$helper_archs" != *"arm64"* ]]; then
+          echo "Helper binary missing expected architecture arm64"
           exit 1
         fi
 
-    - name: Sign ${{ matrix.variant }} app bundle
+    - name: Sign arm64 app bundle
       run: |
         python3 scripts/sign_app_bundle.py build/Build/Products/Release/MoonlightEnhanced.app \
           --entitlements Moonlight.entitlements \
           --extension-entitlements FileProviderExtension/FileProvider.entitlements
 
-    - name: Package ${{ matrix.variant }} app bundle
+    - name: Package arm64 app bundle
       run: |
         mkdir -p dist/app
         cp -R "build/Build/Products/Release/MoonlightEnhanced.app" "dist/app/MoonlightEnhanced.app"
 
-    - name: Create ${{ matrix.variant }} DMG
+    - name: Create arm64 DMG
       run: |
         brew install create-dmg || true
 
         create-dmg \
-          --volname "Moonlight macOS Enhanced (${{ matrix.variant }})" \
+          --volname "Moonlight macOS Enhanced (arm64)" \
           --volicon "dist/app/MoonlightEnhanced.app/Contents/Resources/AppIcon.icns" \
           --window-pos 200 120 \
           --window-size 600 400 \
@@ -162,15 +152,15 @@ jobs:
           --icon "MoonlightEnhanced.app" 150 185 \
           --hide-extension "MoonlightEnhanced.app" \
           --app-drop-link 450 185 \
-          "dist/Moonlight-macOS-Enhanced-${{ matrix.variant }}.dmg" \
+          "dist/Moonlight-macOS-Enhanced-arm64.dmg" \
           "dist/app/MoonlightEnhanced.app" || \
-        hdiutil create -volname "Moonlight-${{ matrix.variant }}" -srcfolder "dist/app/MoonlightEnhanced.app" -ov -format UDZO "dist/Moonlight-macOS-Enhanced-${{ matrix.variant }}.dmg"
+        hdiutil create -volname "Moonlight-arm64" -srcfolder "dist/app/MoonlightEnhanced.app" -ov -format UDZO "dist/Moonlight-macOS-Enhanced-arm64.dmg"
 
-    - name: Upload ${{ matrix.variant }} DMG artifact
+    - name: Upload arm64 DMG artifact
       uses: actions/upload-artifact@v7
       with:
-        name: Moonlight-macOS-dmg-${{ matrix.variant }}
-        path: dist/Moonlight-macOS-Enhanced-${{ matrix.variant }}.dmg
+        name: Moonlight-macOS-dmg-arm64
+        path: dist/Moonlight-macOS-Enhanced-arm64.dmg
         if-no-files-found: error
 
   build:
