@@ -43,6 +43,15 @@ jobs:
         submodules: recursive
         fetch-depth: 0
 
+    - name: Select Xcode 26.3
+      shell: bash
+      run: |
+        sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+        xcode=$(xcodebuild -version | sed -n '1p')
+        [ "$xcode" = 'Xcode 26.3' ] || { echo "::error::Expected Xcode 26.3, got $xcode" >&2; exit 1; }
+        sdk=$(xcrun --sdk macosx --show-sdk-version)
+        [ "${sdk%%.*}" -ge 26 ] || { echo "::error::Expected macOS SDK major >=26, got $sdk" >&2; exit 1; }
+
     - name: Show Build Environment
       run: |
         xcodebuild -version
