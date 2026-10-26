@@ -121,6 +121,28 @@ jobs:
           "$RUNNER_TEMP/pyrowave-receiver-tests"
           "$RUNNER_TEMP/pyrowave-coordinator-tests"
 
+      - name: Compile and probe Metal pipelines (not decode pixels)
+        env:
+          ASAN_OPTIONS: halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          flags=(-std=c++14 -fobjc-arc -Wall -Wextra -Werror -g -O1
+                 '-fsanitize=address,undefined' -fno-omit-frame-pointer)
+          xcrun clang++ "${flags[@]}" -I Limelight/Stream/PyroWave \
+            Limelight/Stream/PyroWave/MLPyrowaveMetalKernels.mm tests/pyrowave/test_metal_kernels.mm \
+            -framework Foundation -framework Metal -o "$RUNNER_TEMP/pyrowave-metal-kernels-tests"
+          if "$RUNNER_TEMP/pyrowave-metal-kernels-tests"; then
+            echo 'Metal pipeline creation passed; no decode dispatch/pixel validation' >> "$GITHUB_STEP_SUMMARY"
+          else
+            status=$?
+            if [ "$status" -eq 77 ]; then
+              echo '::notice::GPU pipeline checks SKIPPED: supported Metal device unavailable'
+              echo 'GPU pipeline checks SKIPPED; no decode dispatch/pixel validation' >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            else
+              exit "$status"
+            fi
+          fi
       - name: Checkout pinned CPU packetizer oracle
         uses: actions/checkout@v6
         with:

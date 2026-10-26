@@ -138,6 +138,7 @@
 				Stream/PyroWave/MLPyrowaveCodec.cpp,
 				Stream/PyroWave/MLPyrowaveReceiver.cpp,
 				Stream/PyroWave/MLPyrowaveCoordinator.mm,
+				Stream/PyroWave/MLPyrowaveMetalKernels.mm,
 				Limelight.xcdatamodeld,
 				macOS/AppCell.xib,
 				macOS/AppDelegateForAppKit.m,
