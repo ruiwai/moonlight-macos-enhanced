@@ -9,7 +9,7 @@ submodules and the application build are not needed.
 
 ## Dependency boundary
 
-- Native Common: `77bd732ff3d8b034f1fc6937e89ac0585d83fa0d`
+- Native Common: `65f43ca224945b3bc573de7c46b1d2849ac06a41`
   (`moonlight-common/moonlight-common-c`).
 - Foundation Common: `ddd52e20252ac2e27b4137b6db24530cf96fdfbb`.
 
@@ -17,6 +17,18 @@ At these pins, the protocol/reassembly helper sources are identical, but the
 public API and streaming integration are incompatible. Helper equality is not
 API/ABI compatibility: do not replace the native pin with Foundation Common.
 This prerequisite adds no application integration and leaves PyroWave disabled.
+
+## Common raw bridge /v1 (not app enablement)
+
+Common now exposes descriptor version 1 with full outer frame ID/RTP timestamp
+and receive/presentation microseconds; received payload/descriptor are borrowed synchronously until callback return.
+Common frees the packet; the application must copy anything retained.
+No app callback, negotiation, preflight, Metal or presentation enablement is added.
+[`PyrowavePacketCallbackTest.c`](../../moonlight-common/moonlight-common-c/tests/PyrowavePacketCallbackTest.c) links actual Common
+[`RtpVideoQueue.c`](../../moonlight-common/moonlight-common-c/src/RtpVideoQueue.c) / [`VideoDepacketizer.c`](../../moonlight-common/moonlight-common-c/src/VideoDepacketizer.c), checking exact identity/timing and selected-path gates.
+Its arbitrary synthetic payload is not real codec data or validator composition.
+[Public Common run 40390473131](https://github.com/ruiwai/moonlight-common-c/actions/runs/40390473131) passed one ASan/UBSan CTest on `macos-15` at this pin, after initial fixture UB was fixed.
+Legacy/input/app CI has not yet been verified at the new pin; this does not establish live interoperability or readiness.
 
 ## What CI checks
 
@@ -80,7 +92,7 @@ packets + temporary metadata + caller output stays below 128 MiB. Accepted outpu
 capacity is <=16 MiB. Runtime byte checks supplement preflight; no unbounded queue.
 This accounts allocation requests, not process RSS/allocator internals.
 
-Map from [protocol contract](../../docs/pyrowave-protocol-contract.md) requirements:
+Map from local design `docs/pyrowave-protocol-contract.md` requirements (not a tracked remote document):
 - Outer transport/envelope: `testReorderCopyReplay`, `testDuplicates`,
   `testDescriptorsAndPadding`, `testMalformedAndBudgets` cover missing header,
   reordering, all three duplicate kinds/flags, padding/timestamp/geometry conflicts,
