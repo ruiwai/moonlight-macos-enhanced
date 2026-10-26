@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		D5303FDE0000000000000001 /* PyrowaveNegotiation.c in Sources */ = {isa = PBXBuildFile; fileRef = D5303FDE0000000000000002 /* PyrowaveNegotiation.c */; };
 		D5303FDE0000000000000003 /* PyrowaveProtocol.c in Sources */ = {isa = PBXBuildFile; fileRef = D5303FDE0000000000000004 /* PyrowaveProtocol.c */; };
+		D5303FDE0000000000000005 /* PyrowaveReassembly.c in Sources */ = {isa = PBXBuildFile; fileRef = D5303FDE0000000000000006 /* PyrowaveReassembly.c */; };
 		4C1F46A4268C6C7E007056FC /* PlatformCrypto.c in Sources */ = {isa = PBXBuildFile; fileRef = 4C1F46A3268C6C7E007056FC /* PlatformCrypto.c */; };
 		4C1F46A9268C6CC7007056FC /* RtpAudioQueue.c in Sources */ = {isa = PBXBuildFile; fileRef = 4C1F46A5268C6CC7007056FC /* RtpAudioQueue.c */; };
 		4C1F46AA268C6CC7007056FC /* RtpVideoQueue.c in Sources */ = {isa = PBXBuildFile; fileRef = 4C1F46A8268C6CC7007056FC /* RtpVideoQueue.c */; };
@@ -47,6 +48,7 @@
 /* Begin PBXFileReference section */
 		D5303FDE0000000000000002 /* PyrowaveNegotiation.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = PyrowaveNegotiation.c; sourceTree = "<group>"; };
 		D5303FDE0000000000000004 /* PyrowaveProtocol.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = PyrowaveProtocol.c; sourceTree = "<group>"; };
+		D5303FDE0000000000000006 /* PyrowaveReassembly.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = PyrowaveReassembly.c; sourceTree = "<group>"; };
 		4C1F46A2268C6C7E007056FC /* PlatformCrypto.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = PlatformCrypto.h; sourceTree = "<group>"; };
 		4C1F46A3268C6C7E007056FC /* PlatformCrypto.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = PlatformCrypto.c; sourceTree = "<group>"; };
 		4C1F46A5268C6CC7007056FC /* RtpAudioQueue.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = RtpAudioQueue.c; sourceTree = "<group>"; };
@@ -232,6 +234,7 @@
 			children = (
 				D5303FDE0000000000000002 /* PyrowaveNegotiation.c */,
 				D5303FDE0000000000000004 /* PyrowaveProtocol.c */,
+				D5303FDE0000000000000006 /* PyrowaveReassembly.c */,
 				4C1F46A6268C6CC7007056FC /* RtpAudioQueue.h */,
 				4C1F46A7268C6CC7007056FC /* RtpVideoQueue.h */,
 				4C1F46A5268C6CC7007056FC /* RtpAudioQueue.c */,
@@ -350,6 +353,7 @@
 			files = (
 				D5303FDE0000000000000001 /* PyrowaveNegotiation.c in Sources */,
 				D5303FDE0000000000000003 /* PyrowaveProtocol.c in Sources */,
+				D5303FDE0000000000000005 /* PyrowaveReassembly.c in Sources */,
 				98AB2E401CAD425A0089BB98 /* AudioStream.c in Sources */,
 				98AB2E411CAD425A0089BB98 /* ByteBuffer.c in Sources */,
 				98AB2E421CAD425A0089BB98 /* Connection.c in Sources */,
