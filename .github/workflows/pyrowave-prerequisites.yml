@@ -1,0 +1,54 @@
+name: PyroWave prerequisites
+
+on:
+  push:
+    branches: ['pyrowave/**']
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  common-golden-tests:
+    runs-on: macos-14
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+
+      - name: Initialize only the pinned Common submodule
+        run: |
+          git -c submodule.recurse=false submodule update --init --checkout -- \
+            moonlight-common/moonlight-common-c
+
+      - name: Compile existing Common golden tests with sanitizers
+        run: |
+          common=moonlight-common/moonlight-common-c
+          # Match Common CMake's C11, src includes, and warning flags.
+          # Neither golden-test target has extra compile definitions.
+          flags=(-std=c11 -Wall -Wextra -Werror -g -O1
+                 '-fsanitize=address,undefined' -fno-omit-frame-pointer)
+          xcrun clang "${flags[@]}" -I "$common/src" \
+            "$common/tests/PyrowaveProtocolGoldenTest.c" \
+            "$common/src/PyrowaveProtocol.c" \
+            -o "$RUNNER_TEMP/pyrowave-protocol-golden-tests"
+          xcrun clang "${flags[@]}" -I "$common/src" \
+            "$common/tests/PyrowaveReassemblyGoldenTest.c" \
+            "$common/src/PyrowaveProtocol.c" \
+            "$common/src/PyrowaveReassembly.c" \
+            -o "$RUNNER_TEMP/pyrowave-reassembly-golden-tests"
+
+      - name: Run existing Common golden tests
+        env:
+          ASAN_OPTIONS: halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          "$RUNNER_TEMP/pyrowave-protocol-golden-tests"
+          "$RUNNER_TEMP/pyrowave-reassembly-golden-tests"
