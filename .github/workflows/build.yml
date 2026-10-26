@@ -361,6 +361,9 @@ jobs:
     needs: [build_arch, build_universal, build]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+    concurrency:
+      group: snapshot-${{ github.sha }}
+      cancel-in-progress: false
     permissions:
       contents: write
 
@@ -372,7 +375,22 @@ jobs:
         merge-multiple: true
         path: dist
 
+    - name: Check whether snapshot archives are finalized
+      id: snapshot_publication
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_TAG: build-${{ github.sha }}
+      run: |
+        existing_state=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+          --jq '.[] | select(.tag_name == env.RELEASE_TAG) | (.draft == false or any(.assets[]; .name == "SHA256SUMS"))')
+        if grep -qx true <<< "$existing_state"; then
+          echo "locked=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "locked=false" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Create snapshot draft release
+      if: steps.snapshot_publication.outputs.locked != 'true'
       uses: softprops/action-gh-release@v3
       with:
         tag_name: build-${{ github.sha }}
