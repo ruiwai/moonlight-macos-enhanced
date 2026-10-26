@@ -9,7 +9,7 @@ submodules and the application build are not needed.
 
 ## Dependency boundary
 
-- Native Common: `e26d480328f4ed8b9218c42ddd6fb4341c3a53df`
+- Native Common: `9af0c8cc9be21afce5c735c7876ba03884f7d84c`
   (`moonlight-common/moonlight-common-c`).
 - Foundation Common: `ddd52e20252ac2e27b4137b6db24530cf96fdfbb`.
 
@@ -18,17 +18,20 @@ public API and streaming integration are incompatible. Helper equality is not
 API/ABI compatibility: do not replace the native pin with Foundation Common.
 This prerequisite adds no application integration and leaves PyroWave disabled.
 
-## Common raw bridge /v1 (not app enablement)
+## Common raw bridge /v2 (not app enablement)
 
-Common now exposes descriptor version 1 with full outer frame ID/RTP timestamp
+Common now requires descriptor version 2 (rejecting v1) with full outer frame ID/RTP timestamp
 and receive/presentation microseconds; received payload/descriptor are borrowed synchronously until callback return.
-Common frees the packet; the application must copy anything retained.
+Common frees the packet; copy anything retained, never free borrowed storage or synchronously stop/destroy Common. Context survives stop through joins/cleanup; submissions may follow stop, never cleanup.
+`submit` returns `int`: only `LI_PYROWAVE_PACKET_VALIDATED_FRAME` after synchronous owned complete PYRF recovery, protected TLV/codec and local-deadline validation satisfies the first-full-frame watchdog. Partial/malformed/expired/replayed input returns `LI_PYROWAVE_PACKET_IGNORED`; ignored/unknown results do not acknowledge a frame. This is not GPU/presentation success.
+PyroWave bypasses the encrypted pre-auth frame filter: authenticate first, then require app full-ID/replay validation; AES-GCM and timeouts are unchanged. Watchdog result routing/filter helper are synthetically tested, not live encrypted/network receive or actual owned validator composition.
 No app callback, app selection/preflight, Metal or presentation enablement is added.
 [`PyrowavePacketCallbackTest.c`](../../moonlight-common/moonlight-common-c/tests/PyrowavePacketCallbackTest.c) links actual Common
 [`RtpVideoQueue.c`](../../moonlight-common/moonlight-common-c/src/RtpVideoQueue.c) / [`VideoDepacketizer.c`](../../moonlight-common/moonlight-common-c/src/VideoDepacketizer.c), checking exact identity/timing and selected-path gates.
 Its arbitrary synthetic payload is not real codec data or validator composition.
 [Public Common run 40390473131](https://github.com/ruiwai/moonlight-common-c/actions/runs/40390473131) passed one ASan/UBSan CTest on `macos-15` at historical pin `65f43ca`, after initial fixture UB was fixed.
 Parent app build at the current pin is pending; this does not establish live interoperability or readiness.
+At exact Common `9af0c8cc9be21afce5c735c7876ba03884f7d84c`, [run 40403395078](https://github.com/ruiwai/moonlight-common-c/actions/runs/40403395078) passed both callback + negotiation CTests with fatal ASan/UBSan (`/tmp/pyrowave-9af0c8c-reviewed.log:249-258`). Live encrypted/network and actual callback → owned recovery/TLV/codec/deadline validator composition remain required.
 
 ## What CI checks
 
@@ -104,7 +107,7 @@ Map from local design `docs/pyrowave-protocol-contract.md` requirements (not a t
   copy, valid/invalid metadata, zero outputs/unchanged sentinel bytes on failure,
   replay and no carryover; `test_metadata.c` covers TLV flags/length/type/max rules.
 - Composite/fuzz progress: `test_pipeline.cpp` adds CPU composition and finite
-  deterministic parser/wire mutation smoke (execution pending); a coverage-guided
+  deterministic parser/wire mutation smoke (baseline CI passed, not callback composition); a coverage-guided
   fuzz campaign and real encoder/GPU acceptance remain unfulfilled requirements.
 - Live negotiation interoperability, real encoder compatibility, codec decoding, and GPU
   lifetime/validation remain pending; synthetic fixtures prove none of these.
@@ -184,12 +187,12 @@ This is a pinned CPU serialization/layout oracle, not real GPU-encoded corpus,
 pixel decoding, transport interoperability, shader safety or feature readiness.
 Real GPU-encoded corpus and GPU validation remain deferred.
 
-## CPU composition /v1 (execution pending)
+## CPU composition /v1 (synthetic baseline CI passed)
 
 Observed prerequisite CI runs: baseline Common goldens 40329294718, metadata
 40331107419, strict reassembly 40334474521, codec 40337167846, and pinned CPU
-packetizer oracle 40339618731 all passed. These are not execution evidence for
-the new composition test, which remains pending.
+packetizer oracle 40339618731 all passed. Those historical runs did not execute
+the composition test; parent baseline `6e97b2f` run 40401794573 subsequently passed its synthetic CPU composition/mutation smoke, not raw callback composition.
 
 `test_pipeline.cpp` links actual Common protocol/reassembly, native metadata/
 reassembly C11 objects and the C++14 codec, without mocks, upstream headers, GPU,
@@ -207,20 +210,20 @@ trailing bytes. Accepted results must own exact bytes; failures publish nothing,
 and inputs remain unchanged. Packet/output buffers are fixed <=256 bytes;
 production allocation caps still bound mutated geometry. CI compiles C and C++
 separately with strict warnings/ASan/UBSan, then runs in a fatal-sanitizer step
-limited to 3 minutes inside the 10-minute job. Execution is pending: local checks
+limited to 3 minutes inside the 10-minute job. Baseline CI passed as recorded above; historical local checks
 are selected actionlint and exhaustive C++14 cppcheck only. This is finite smoke,
 not coverage-guided fuzzing, a fuzz proof, transport interoperability, pixel/GPU
 validation, or permission to enable PyroWave.
 
 ## Common negotiation /v1 (Common CI passed; not app enablement)
 
-At `e26d480`, actual Common RTSP uses a bounded five-attribute decimal SDP parser,
+Introduced at `e26d480` and retained at the current pin, actual Common RTSP uses a bounded five-attribute decimal SDP parser,
 retains the negotiated contract per context, emits selected SDR ANNOUNCE fields
 and enforces negotiated inner-packet size on the raw callback path.
 [Common run 40400754728](https://github.com/ruiwai/moonlight-common-c/actions/runs/40400754728) passed two actual-Common callback + negotiation CTests on `macos-15`, ASan/UBSan fatal.
 Historical `5303fde`: attempt 1 had no runner; attempt 2 callback passed, negotiation fixture lacked `VideoPortNumber`; `e26d480` fixes only that fixture.
 Tests link actual Common helpers/serializer with synthetic inputs, not network RTSP.
 The two production units have explicit Common Xcode membership; Apple-only tests
-are not app sources. Parent app build at this pin is pending; historical `a8a647d`
-CI was verified all green with `65f43ca`. The app still cannot opt in: no active
+are not app sources; no PBX change is needed for this repin. Historical `a8a647d`
+CI was all green with `65f43ca`; parent baseline `6e97b2f` subsequently passed all three workflows (PyroWave, Input 12/12 CTests, macOS app build/draft), compiling both Common units once (`/tmp/pyrowave-6e97b2f-404017*-reviewed.log`). New-pin parent CI remains pending. The app still cannot opt in: no actual callback or active
 coordinator, actual-device preflight, Metal decoding or presentation integration.
