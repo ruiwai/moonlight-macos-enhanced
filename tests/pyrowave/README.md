@@ -9,7 +9,7 @@ submodules and the application build are not needed.
 
 ## Dependency boundary
 
-- Native Common: `65f43ca224945b3bc573de7c46b1d2849ac06a41`
+- Native Common: `e26d480328f4ed8b9218c42ddd6fb4341c3a53df`
   (`moonlight-common/moonlight-common-c`).
 - Foundation Common: `ddd52e20252ac2e27b4137b6db24530cf96fdfbb`.
 
@@ -23,12 +23,12 @@ This prerequisite adds no application integration and leaves PyroWave disabled.
 Common now exposes descriptor version 1 with full outer frame ID/RTP timestamp
 and receive/presentation microseconds; received payload/descriptor are borrowed synchronously until callback return.
 Common frees the packet; the application must copy anything retained.
-No app callback, negotiation, preflight, Metal or presentation enablement is added.
+No app callback, app selection/preflight, Metal or presentation enablement is added.
 [`PyrowavePacketCallbackTest.c`](../../moonlight-common/moonlight-common-c/tests/PyrowavePacketCallbackTest.c) links actual Common
 [`RtpVideoQueue.c`](../../moonlight-common/moonlight-common-c/src/RtpVideoQueue.c) / [`VideoDepacketizer.c`](../../moonlight-common/moonlight-common-c/src/VideoDepacketizer.c), checking exact identity/timing and selected-path gates.
 Its arbitrary synthetic payload is not real codec data or validator composition.
-[Public Common run 40390473131](https://github.com/ruiwai/moonlight-common-c/actions/runs/40390473131) passed one ASan/UBSan CTest on `macos-15` at this pin, after initial fixture UB was fixed.
-Legacy/input/app CI has not yet been verified at the new pin; this does not establish live interoperability or readiness.
+[Public Common run 40390473131](https://github.com/ruiwai/moonlight-common-c/actions/runs/40390473131) passed one ASan/UBSan CTest on `macos-15` at historical pin `65f43ca`, after initial fixture UB was fixed.
+Parent app build at the current pin is pending; this does not establish live interoperability or readiness.
 
 ## What CI checks
 
@@ -106,7 +106,7 @@ Map from local design `docs/pyrowave-protocol-contract.md` requirements (not a t
 - Composite/fuzz progress: `test_pipeline.cpp` adds CPU composition and finite
   deterministic parser/wire mutation smoke (execution pending); a coverage-guided
   fuzz campaign and real encoder/GPU acceptance remain unfulfilled requirements.
-- Negotiation, real encoder compatibility, codec decoding, and GPU
+- Live negotiation interoperability, real encoder compatibility, codec decoding, and GPU
   lifetime/validation remain pending; synthetic fixtures prove none of these.
 Allocation failures are handled but not fault-injected/tested; reassembly CI passed
 in run 40334474521. Local lint is not test execution.
@@ -211,3 +211,16 @@ limited to 3 minutes inside the 10-minute job. Execution is pending: local check
 are selected actionlint and exhaustive C++14 cppcheck only. This is finite smoke,
 not coverage-guided fuzzing, a fuzz proof, transport interoperability, pixel/GPU
 validation, or permission to enable PyroWave.
+
+## Common negotiation /v1 (Common CI passed; not app enablement)
+
+At `e26d480`, actual Common RTSP uses a bounded five-attribute decimal SDP parser,
+retains the negotiated contract per context, emits selected SDR ANNOUNCE fields
+and enforces negotiated inner-packet size on the raw callback path.
+[Common run 40400754728](https://github.com/ruiwai/moonlight-common-c/actions/runs/40400754728) passed two actual-Common callback + negotiation CTests on `macos-15`, ASan/UBSan fatal.
+Historical `5303fde`: attempt 1 had no runner; attempt 2 callback passed, negotiation fixture lacked `VideoPortNumber`; `e26d480` fixes only that fixture.
+Tests link actual Common helpers/serializer with synthetic inputs, not network RTSP.
+The two production units have explicit Common Xcode membership; Apple-only tests
+are not app sources. Parent app build at this pin is pending; historical `a8a647d`
+CI was verified all green with `65f43ca`. The app still cannot opt in: no active
+coordinator, actual-device preflight, Metal decoding or presentation integration.

@@ -2,14 +2,14 @@
 
 ## Status, pins and scope
 
-Common raw bridge implemented; all app/negotiation/Metal integration remains planned, including coordinator and renderer integration.
-Baseline app: `b8779e4018ed470fd5230bfce112fd4720f2a4ae`; Native Common: `65f43ca224945b3bc573de7c46b1d2849ac06a41`.
+Common raw bridge version 1 and SDR negotiation implemented at `e26d480`; app selection/preflight, coordinator, Metal and presentation remain planned/unwired.
+Parent app baseline: `a8a647de60aa508b9b557e7c2df08286d45cecbf`; Native Common: `e26d480328f4ed8b9218c42ddd6fb4341c3a53df` (parent index still `65f43ca`).
 Common remains the public `https://github.com/ruiwai/moonlight-common-c.git`; do not swap in Foundation Common (different streaming API/ABI).
 Wire contract: protocol **2**, bitstream **2**, payload **3**; exact encoder reference: `cc91cbf6363721d19d135d05ca8e3d8665ea6afd`.
 Initial scope: supported Apple Silicon, SDR BT.709, 8-bit 4:2:0, negotiated range/siting; FP32 arithmetic **and storage**. HDR/444/10-bit and FP16 are deferred.
 Local designs `docs/pyrowave-protocol-contract.md` and `docs/pyrowave-metal-decoder.md` provide background, not tracked remote documents or current dependency/build inventory.
 Their older missing-dependency statements do not describe this baseline; neither design is changed here.
-Existing symbols below are source anchors. **Except the implemented Common raw descriptor/route/gate, new app APIs, coordinator/renderer entry points and wiring below are PROPOSED.**
+Existing symbols below are source anchors. **Common raw descriptor/route/gates and negotiation are implemented; new app APIs, selection/preflight and coordinator/renderer wiring below are PROPOSED.**
 
 ## Current → planned call path and selection
 
@@ -18,21 +18,21 @@ Existing symbols below are source anchors. **Except the implemented Common raw d
 | Existing file:symbol | Current responsibility → planned app/integration work |
 | --- | --- |
 | `Native/Limelight/Stream/Connection.m:DrDecoderSetup`, `_drCallbacks`, `RegisterConnection` | Legacy renderer setup and per-connection callbacks/context → own preflight/selection and the per-connection raw-packet descriptor. |
-| `Common/src/RtspConnection.c:performRtspHandshakeCtx` | Legacy codec negotiation → strict bounded PyroWave SDP parsing and per-context selected contract. |
-| `Common/src/SdpGenerator.c:getAttributesList` | Intentionally suppresses PyroWave feature/attributes → advertise only the negotiated, capable selected path. |
+| `Common/src/RtspConnection.c:performRtspHandshakeCtx` | Implemented bounded five-attribute PyroWave parser/helper and per-context retained contract → app opt-in/preflight remains planned. |
+| `Common/src/SdpGenerator.c:getAttributesList` | Implemented selected SDR contract validation and ANNOUNCE feature/attributes; unselected legacy output remains unchanged. |
 | `Common/src/RtpVideoQueue.c:RtpvAddPacket` | Implemented selected PyroWave version-1 route bypasses legacy FEC, contiguous RTP sequence and 16-bit frame-index rejection; preserves full outer identity/timing → app reassembly ownership remains planned. |
 | `Common/src/VideoDepacketizer.c:queueRtpPacketCtx` | Implemented selected PyroWave raw hook before millisecond conversion/legacy H.26x processing; validates bounds, borrows synchronously and frees → app callback remains planned. |
 | `Native/Limelight/Stream/Connection.m:DrSubmitDecodeUnit`, `DrStop` | Legacy submit/stop → separate raw packet dispatch and generation-safe coordinator teardown; preserve legacy behavior. |
 | `Native/Limelight/Stream/VideoDecoderRenderer.m:setupMetalRenderer`, `encodePresentFromTexture:toDrawable:commandBuffer:` | Existing renderer device/scheduling/RGB presentation → new three-plane decode/color bridge, not a VideoToolbox compressed-format alias. |
 
-PROPOSED negotiation parses all five complete decimal attributes under `x-ss-pyrowave.*`:
+Implemented Common negotiation at `e26d480` parses all five complete decimal attributes under `x-ss-pyrowave.*`:
 `protocolVersion`, `bitstreamVersion`, `payloadVersion`, `capabilityFlags`, `maxPacketSize`.
-Bound input lengths and arithmetic; reject missing, malformed, duplicate/conflicting attributes, signs, suffixes and overflow before uint16/uint32 narrowing/allocation.
-Require local **and** peer 2/2/3, negotiated packet budget within Common's 65..65536 inner-packet bounds and the viable outer RTP/NV budget.
-Require REASSEMBLY, FRAME_DEADLINE, BLOCK_AWARE_FEC, FRAME_METADATA, selected SDR709/420 mode and selected limited/full-range capabilities.
+Bounds input lengths and arithmetic; rejects missing, malformed, duplicate/conflicting attributes, signs, suffixes and overflow before uint16/uint32 narrowing/allocation.
+Requires local **and** peer 2/2/3, negotiated packet budget within Common's 65..65536 inner-packet bounds and viable outer RTP/NV budget (inner >128).
+Requires REASSEMBLY, FRAME_DEADLINE, BLOCK_AWARE_FEC, FRAME_METADATA, selected SDR709/420 mode and selected limited/full-range capabilities; retains the result per context.
 ANNOUNCE emits the five `x-ml-pyrowave.*` fields and feature flag only for that negotiated capable path, never for unselected/fallback sessions.
-Validate frame color/depth/sampling/siting against that session; capability intersection is not permission for unsupported modes or partial frames.
-Only explicit PyroWave preference may offer the PyroWave/H.264 fallback mask, and only after actual-device + dimensions + compiled-pipeline/full-footprint preflight.
+The raw callback path enforces negotiated inner-packet size. PROPOSED app validation must match frame color/depth/sampling/siting to the session; no unsupported modes or partial frames.
+PROPOSED app selection: only explicit PyroWave preference may offer the PyroWave/H.264 fallback mask, after actual-device + dimensions + compiled-pipeline/full-footprint preflight.
 Auto and legacy masks remain unchanged. If preflight fails, disclose unavailability/initial H.264 fallback; never advertise an incapable PyroWave path.
 Expose capability to `Limelight/macOS/ViewControllers/SettingsVideoPane.swift` and `Connection.m` only after full preflight.
 Propagate an explicit new preference through `SettingsModel+DerivedValues.swift:videoCodecs`, `SettingsModel+Persistence.swift`, `SettingsObjCBridge.swift`,
@@ -49,7 +49,7 @@ Submission is synchronous; retain nothing borrowed. Common owns/frees the RTP al
 `queueRtpPacketCtx` checks runtime RTP/extension/NV lengths and raw bounds before dispatch, before microsecond truncation or `processRtpPayload`.
 No callback when unselected; `VideoStream.c:startVideoStreamCtx` already rejects selected PyroWave without capability, submit or descriptor version 1 before setup/sockets.
 The raw route returns without legacy decode-unit/IDR processing; unselected legacy ownership remains unchanged. No app calls this bridge, registers a callback or opts in.
-PROPOSED app ownership below is not implemented; negotiation, preflight, Metal and presentation remain disabled/unwired.
+PROPOSED app ownership below is not implemented; app selection/preflight, coordinator, Metal and presentation remain disabled/unwired despite Common negotiation support.
 Context remains valid until the receive thread joins. `VideoStream.c:stopVideoStreamCtx` calls stop **before** joins, cleanup **after** joins:
 submissions may follow stop and be discarded, but never follow cleanup. A callback extension must preserve this existing contract.
 `Connection.m` passes itself through application context backed by the owned `RegisterConnection` registry lifetime through `LiStopConnectionCtx`/joins.
@@ -104,15 +104,15 @@ Implement a new three-plane color conversion, not the current two-plane NV12 ker
 Nevertheless `/tmp/cs-kz-b8779e4-build-reviewed.log:8898` records `CompileC ... VideoDecoderRenderer.m` for macOS at b8779e4.
 Do **not** claim the renderer is uncompiled or add a duplicate renderer source. The exact checked-in membership versus effective-build mechanism remains to be reconciled.
 That reviewed log has no compile records for the existing three `MLPyrowaveMetadata.c`, `MLPyrowaveReassembly.c`, `MLPyrowaveCodec.cpp` translation units.
-PROPOSED deterministic explicit file references → build files → Sources entries for those native helpers and new PyroWave C/C++/ObjC++ units in the app target;
-add Common `PyrowaveProtocol.c` / `PyrowaveReassembly.c` to `moonlight-common/moonlight-common.xcodeproj` exactly once. Headers are not Sources.
+Common `PyrowaveProtocol.c` + `PyrowaveNegotiation.c` explicit file references → build files → src group → Sources entries are added exactly once, awaiting app CI.
+Common `PyrowaveReassembly.c` (not called by negotiation), native validators and coordinator sources remain future membership work; Apple-only tests stay out of the app target. Headers are not Sources.
 Verify actual single compilation/link ownership in macOS CI, including synchronized/generated effects; no blanket membership migration.
 
 ## Remaining implementation and acceptance evidence
 
 | Gate / owner | Required evidence, not supplied by architecture |
 | --- | --- |
-| RTSP/SDP + Connection | Malformed/duplicate/overflow decimals, local/peer versions/caps/range/budgets, preflight/fallback reporting and multiple isolated contexts. |
+| RTSP/SDP + Connection | Common helper/serializer synthetic cases passed on macOS with fatal ASan/UBSan (run 40400754728); app preflight/selection/fallback reporting and live RTSP remain future gates. |
 | Actual RTP → raw callback | Common bridge test covers short RTP/NV/extensions, nonzero sequence, full outer frame-ID reorder/wrap, exact identity/microseconds, gates and context isolation. Synthetic arbitrary payload only: no PYRF/codec validator composition. Still require live encrypted reorder/wrap + complete-frame watchdog notification, inner/outer identity conflicts, ownership and loss/deadline/block-FEC composition end-to-end. |
 | Existing CPU validator composition | Extend `tests/pyrowave/test_metadata.c`, `test_reassembly.c`, `test_codec.cpp`, `test_pipeline.cpp` as appropriate; preserve owned bytes/offsets/metadata/identity, poison/reset and bounded mutation coverage. |
 | Codec → GPU differential | Exact pinned **GPU encoder fixtures** and agreed per-plane error bounds for FP32, sparse/zero bands, edges and dimensions. Current `test_packetizer.cpp` uses synthetic packetizer inputs, **not GPU encoder fixtures**. |
@@ -123,8 +123,9 @@ Verify actual single compilation/link ownership in macOS CI, including synchroni
 Public Common [run 40390473131](https://github.com/ruiwai/moonlight-common-c/actions/runs/40390473131) at `65f43ca` passed **one** `pyrowave-packet-callback-test` CTest on `macos-15`, ASan/UBSan fatal, after initial truncated-fixture UB was fixed.
 `Common/tests/PyrowavePacketCallbackTest.c` links the actual Common library/queue/depacketizer and verifies precise outer metadata with synthetic arbitrary bytes, not real codec payload or validator composition.
 Runtime test registration is macOS-only after the explicit `if(APPLE)` guard change at `6e4befc`; broader Common CI there compiled Linux/macOS, but Windows still failed C11 atomics/`ssize_t`. No universal green claim.
-Last known b8779e4 app CI (historical, not new-pin evidence): PyroWave `40378763533`, Input10 CTest + native fixtures `40378763663`, arm64 build/draft `40378763493`: all success.
-Legacy/input/app CI remains unverified with Common `65f43ca`; the dedicated bridge success does not replace those gates.
+Historical parent `a8a647d` CI with Common `65f43ca` was verified all green (PyroWave, Input11: 11/11 CTests, macOS build/draft); this is not new-pin evidence.
+At Common `e26d480`, [run 40400754728](https://github.com/ruiwai/moonlight-common-c/actions/runs/40400754728) passed two actual-Common callback + negotiation CTests on `macos-15`, ASan/UBSan fatal. Historical `5303fde`: attempt 1 had no runner; attempt 2 callback passed, negotiation fixture lacked `VideoPortNumber`; `e26d480` fixes only that fixture.
+`Common/tests/PyrowaveNegotiationTest.c` tests actual Common helpers/serializer with synthetic inputs, not network RTSP. Parent app build at the new pin is pending.
 These establish their recorded CPU/build/draft boundaries only: no GPU correctness, live-stream interoperability or performance claim.
 Future implementation proceeds in focused bounded changes: one focused commit/push at a time, inspect `gh` run/job logs before the next; acceptance evidence must match the final snapshot.
-This documentation slice performs local lint/static inspection only; no tests, builds, shader execution, stream runs, commits or pushes. Implementation and runtime gates remain open.
+This membership/documentation slice performs local static inspection only; no tests, builds, shader execution, stream runs, staging, commits or pushes. App/runtime gates remain open.
