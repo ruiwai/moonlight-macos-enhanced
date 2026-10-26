@@ -1,7 +1,7 @@
 # PyroWave prerequisites (CI only)
 
 The [workflow](../../.github/workflows/pyrowave-prerequisites.yml) compiles and
-runs the existing Common protocol and reassembly golden tests on `macos-14`.
+runs the existing Common protocol and reassembly golden tests on `macos-15`.
 It runs on pushes to `pyrowave/**`, pull requests targeting `master` or `main`,
 and manual dispatch. Only the native Common gitlink is initialized; nested
 submodules and the application build are not needed.
