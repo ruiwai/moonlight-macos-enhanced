@@ -2,7 +2,7 @@ name: Build and Release
 
 on:
   push:
-    branches: [master, main]
+    branches: ['**']
     tags:
       - 'v*'
   pull_request:
@@ -24,15 +24,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Xcode 27 is only provided on the Apple Silicon xcode-27 image, so
-          # the Intel package is cross-built there.
+          # Cross-build the Intel package on the Apple Silicon runner.
           - variant: arm64
-            runner: xcode-27
+            runner: macos-15
             destination: 'platform=macOS,arch=arm64'
             archs: 'arm64'
             display_name: Apple Silicon
           - variant: x86_64
-            runner: xcode-27
+            runner: macos-15
             destination: 'platform=macOS,arch=x86_64'
             archs: 'x86_64'
             display_name: Intel
@@ -43,9 +42,6 @@ jobs:
       with:
         submodules: recursive
         fetch-depth: 0
-
-    - name: Select Xcode 27.0
-      run: sudo xcode-select -s /Applications/Xcode_27.0.app/Contents/Developer
 
     - name: Show Build Environment
       run: |
@@ -81,10 +77,12 @@ jobs:
           display_version="${GITHUB_REF_NAME#v}"
           if [[ -n "${BASH_REMATCH[2]}" ]]; then update_channel=beta; fi
         fi
-        echo "RELEASE_MARKETING_VERSION=$marketing_version" >> "$GITHUB_ENV"
-        echo "RELEASE_DISPLAY_VERSION=$display_version" >> "$GITHUB_ENV"
-        echo "UPDATE_CHANNEL=$update_channel" >> "$GITHUB_ENV"
-        echo "RELEASE_BUILD_NUMBER=$((1335 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+        {
+          echo "RELEASE_MARKETING_VERSION=$marketing_version"
+          echo "RELEASE_DISPLAY_VERSION=$display_version"
+          echo "UPDATE_CHANNEL=$update_channel"
+          echo "RELEASE_BUILD_NUMBER=$((1335 + GITHUB_RUN_NUMBER))"
+        } >> "$GITHUB_ENV"
 
     - name: Build ${{ matrix.display_name }} package
       run: |
@@ -183,7 +181,7 @@ jobs:
   build_universal:
     name: Build universal
     needs: build_arch
-    runs-on: xcode-27
+    runs-on: macos-15
 
     steps:
     - name: Checkout signing tools
@@ -359,6 +357,37 @@ jobs:
 
         echo "All required build jobs passed."
 
+  snapshot_release:
+    needs: [build_arch, build_universal, build]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+    permissions:
+      contents: write
+
+    steps:
+    - name: Download DMG artifacts
+      uses: actions/download-artifact@v8
+      with:
+        pattern: Moonlight-macOS-dmg-*
+        merge-multiple: true
+        path: dist
+
+    - name: Create snapshot draft release
+      uses: softprops/action-gh-release@v3
+      with:
+        tag_name: build-${{ github.sha }}
+        target_commitish: ${{ github.sha }}
+        name: ${{ github.sha }}
+        draft: true
+        prerelease: true
+        make_latest: false
+        fail_on_unmatched_files: true
+        files: |
+          dist/Moonlight-macOS-Enhanced-x86_64.dmg
+          dist/Moonlight-macOS-Enhanced-arm64.dmg
+          dist/Moonlight-macOS-Enhanced-universal.dmg
+        body: ''
+
   release:
     needs: [build_arch, build_universal, build]
     runs-on: ubuntu-latest
@@ -393,7 +422,7 @@ jobs:
 
     - name: Get Version
       id: version
-      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
     - name: Check whether release archives are finalized
       id: publication
