@@ -71,3 +71,31 @@ equivalence, which must be checked with encoder/reference/color evidence later.
 The standalone actual-device test checks only pipeline creation and limits; an
 unavailable supported GPU is an explicit skip, not a pass. No runtime corpus,
 decode dispatch, pixel validation or local build/runtime result is claimed here.
+
+## Decoder/v1 host implementation
+
+`MLPyrowaveMetalDecoder.mm` adapts the same pinned `metal/pyrowave_decoder.mm`
+regions `DequantPush`, `IdwtPush`, `encode_dequant`, `encode_idwt_dispatch` and
+`encode_idwt`, plus `metal/pyrowave_common.mm`'s `WaveletPyramid::init` view layout.
+These host files carry Copyright (c) 2026 Hans-Kristian Arntzen, SPDX MIT;
+the adapter preserves attribution and the complete MIT notice above. Layout table
+ordering also follows pinned `metal/pyrowave_bitstream.cpp`'s `BlockLayout::init`
+(2025 Hans-Kristian Arntzen / 2026 AlkaidLab, MIT AND GPL-3.0-only).
+No upstream parser, upload growth, blocking slot reuse or precision selection is
+imported. Only immutable CPU-validated frames enter FP32 R32Float reconstruction;
+final private R8Unorm planes retain the SDR `RangeScale = 1` baseline.
+
+One in-flight GPU slot and one coordinator-pending CPU frame are the intended
+integration bound. The backend alone commits the supplied renderer queue buffer;
+the synchronous presentation borrow must encode every last reader there, without
+retaining planes/buffer, committing, enqueueing or using another queue. Completion
+retains private retirement state, not decoder/frame/UI, until all readers complete.
+Two fixed tracked heaps bound private textures and shared uploads. The 256 MiB
+session accounting reserves 128 MiB strict reassembly including scratch, 32 MiB
+validation peak, two CPU owners (each 16 MiB + 16-byte guard + offset table + 4096
+bytes), and 1 MiB bookkeeping, then charges actual heap sizes; views alias storage.
+This is not a process-RSS/driver-cache/global-memory guarantee. Configuration is
+immutable: callers must retire/drain old instances before same-session replacement.
+No network/settings/renderer wiring or throughput promise is added. App compilation
+is pending a later remote build; GPU correctness and live-stream validation are
+reserved to the user on hardware, not proved by static inspection or submission.
