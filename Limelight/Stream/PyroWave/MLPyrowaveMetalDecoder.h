@@ -30,7 +30,7 @@ typedef void (^MLPyrowaveMetalCompletion)(BOOL success);
 // owner (well below four leases); callers must not accumulate additional owners.
 // Immutable configuration: destroy/drain the old instance before same-session
 // replacement. stop is permanent, never frees resources still read by the GPU.
-// 256 MiB session allocation accounting, not process RSS/opaque driver caches or
+// 512 MiB session allocation accounting, not process RSS/opaque driver caches or
 // a global overlap guarantee. Encoding/submission is NOT GPU correctness proof.
 @interface MLPyrowaveMetalDecoder : NSObject
 @property(nonatomic, readonly) MLPyrowaveConfiguration configuration;

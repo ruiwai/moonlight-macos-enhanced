@@ -24,10 +24,17 @@ static void cpuDrawableTests()
         {1280,720,3840,2160,1280,720}, {1280,720,5120,2880,1280,720},
         {1280,720,1280,720,1280,720}, {1280,720,1080,1920,405,720},
         {1280,720,2560,1600,1152,720}, {1280,720,3,2,3,2},
+        {1920,1080,3840,2160,1920,1080}, {1920,1080,5120,2880,1920,1080},
+        {1920,1080,960,540,960,540},
+        {2560,1440,3840,2160,2560,1440}, {2560,1440,5120,2880,2560,1440},
+        {2560,1440,960,540,960,540},
+        {3840,2160,3840,2160,3840,2160}, {3840,2160,5120,2880,3840,2160},
+        {3840,2160,960,540,960,540},
         {3,2,8,5,3,1}, {2,2,1,1,1,1}, {16384,16384,16384,16384,16384,16384}
     };
-    for (unsigned resize = 0; resize < 8; ++resize) for (unsigned i = 0; i < 9; ++i) {
-        const auto &c = cases[resize % 2 ? 8 - i : i]; // Repeated back-and-forth resize.
+    const unsigned count = sizeof(cases) / sizeof(cases[0]);
+    for (unsigned resize = 0; resize < 8; ++resize) for (unsigned i = 0; i < count; ++i) {
+        const auto &c = cases[resize % 2 ? count - 1 - i : i]; // Repeated back-and-forth resize.
         uint32_t w = 99, h = 99;
         CHECK(MLPyrowaveSelectDrawableSize(c[0], c[1], c[2], c[3], &w, &h));
         CHECK(w == c[4] && h == c[5]);
@@ -60,6 +67,7 @@ static void invalid(MLPyrowaveConfiguration c, MLPyrowaveClock clock, NSString *
 static void cpuFactoryTests()
 {
     const uint64_t cap = MLPyrowaveSessionAllocationCap;
+    CHECK(cap == UINT64_C(512) * 1024 * 1024);
     CHECK(!MLPyrowavePresentationFitsBudget(0, 1, 2));
     CHECK(!MLPyrowavePresentationFitsBudget(1, 0, 2));
     CHECK(!MLPyrowavePresentationFitsBudget(1, 1, 0));
@@ -188,6 +196,24 @@ static void checkPixels(id<MTLCommandQueue> queue, id<MTLTexture> target,
     if (top) { pixel(midX, 0, 0); pixel(midX, top - 1, 0); }
     if (bottom < height) { pixel(midX, bottom, 0); pixel(midX, height - 1, 0); }
 }
+// Allocation/preflight only: no packets, submissions or pixel-correctness claim.
+static void resolutionAllocationSmoke(id<MTLCommandQueue> queue)
+{
+    const uint32_t sizes[][2] = {{1280,720}, {1920,1080}, {2560,1440}, {3840,2160}};
+    for (const auto &size : sizes) {
+        @autoreleasepool {
+            auto c = config(); c.width = size[0]; c.height = size[1]; // SDR, generation 1.
+            NSError *error = sentinel();
+            auto *renderer = [MLPyrowaveMetalRenderer rendererWithCommandQueue:queue configuration:c
+                clock:clockNow context:nullptr error:&error];
+            if (!renderer) std::fprintf(stderr, "%ux%u allocation factory failed: %s\n",
+                c.width, c.height, error.description.UTF8String);
+            CHECK(renderer && error == nil); // Supported-device failures FAIL, never skip.
+            CHECK([renderer canPresentWidth:c.width height:c.height]);
+            [renderer stop];
+        } // Drain all session resources before the next source resolution.
+    }
+}
 static void hardwareTests(id<MTLCommandQueue> queue, MLPyrowaveConfiguration c)
 {
     NSError *error = sentinel();
@@ -284,6 +310,7 @@ int main()
             return 77;
         }
         id<MTLCommandQueue> queue = [device newCommandQueue]; CHECK(queue && queue.device == device);
+        resolutionAllocationSmoke(queue);
         for (unsigned mode = 0; mode < 4; ++mode) {
             @autoreleasepool {
                 auto c = config(); c.range = uint8_t(mode & 1); c.siting = uint8_t(mode >> 1);

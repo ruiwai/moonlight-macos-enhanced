@@ -20,11 +20,12 @@
 
 ## Start small and observe the actual selection
 
-1. Start with SDR **1280x720**. The drawable canvas is aspect-preserving and
+1. Test SDR **1920x1080**, **2560x1440** and **3840x2160**; 1280x720 is an optional
+   baseline, not a forced size. The drawable canvas is aspect-preserving and
    bounded by both source and backing dimensions; Retina/4K backing alone no
    longer charges a full-4K canvas. The compositor scales the canvas to the window.
-   Preflight/setup reserve two maximum source-size canvases within the unchanged
-   **256 MiB** session cap; high-resolution sources can still fail. Geometry is
+   Preflight/setup account for two maximum source-size canvases within the hard
+   **512 MiB** session cap, not a full-cap allocation; actual charges must fit. Geometry is
    not memory proof. Resizing neither recreates the decoder nor raises the budget.
 2. In Video settings choose **PyroWave (Experimental)** (stored index 3).
    Indices 0 H.264, 1 H.265 and 2 AV1, and default H.264, remain unchanged;

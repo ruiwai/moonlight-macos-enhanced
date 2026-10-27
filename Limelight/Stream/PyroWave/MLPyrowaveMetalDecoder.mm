@@ -218,7 +218,7 @@ bool AllocateHeaps(MLPyrowaveMetalPool *p, MTLTextureDescriptor * __strong const
     if (!PaddedSize([d heapBufferSizeAndAlignWithLength:Payload options:Shared], sharedSize) ||
         !PaddedSize([d heapBufferSizeAndAlignWithLength:p->layout.offsetBytes options:Shared], sharedSize) ||
         !Add(privateSize, sharedSize, sum) || !Add(sum, p->layout.cpuReserve, sum) || sum > MLPyrowaveSessionAllocationCap) {
-        Fail(error, @"Decoder buffer heap query invalid/overflowed, or CPU reservation plus padded heaps exceeds 256 MiB");
+        Fail(error, @"Decoder buffer heap query invalid/overflowed, or CPU reservation plus padded heaps exceeds 512 MiB");
         return false; // BEFORE either heap is created; no growing upload storage.
     }
     MTLHeapDescriptor *hd = [MTLHeapDescriptor new];
@@ -233,7 +233,7 @@ bool AllocateHeaps(MLPyrowaveMetalPool *p, MTLTextureDescriptor * __strong const
         p->privateHeap.size < privateSize || p->sharedHeap.size < sharedSize ||
         !Add(p->privateHeap.size, p->sharedHeap.size, p->gpuBytes) ||
         !Add(p->gpuBytes, p->layout.cpuReserve, sum) || sum > MLPyrowaveSessionAllocationCap) {
-        Fail(error, @"Decoder fixed heaps allocation/device/storage/size validation failed or actual heaps plus CPU reservation exceeds 256 MiB");
+        Fail(error, @"Decoder fixed heaps allocation/device/storage/size validation failed or actual heaps plus CPU reservation exceeds 512 MiB");
         return false;
     }
     return AllocateResources(p, desc, error); // Views alias the pyramid; no double charge.
@@ -338,7 +338,7 @@ bool EncodeIDWT(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
         return Fail(error, @"Decoder pipeline/sampler limits or actual renderer queue/device mismatch");
     Layout layout;
     if (!LayoutBudget(session, kernels.device.maxBufferLength, layout))
-        return Fail(error, @"Decoder layout/CPU reservation exceeds 256 MiB or buffer/index limits");
+        return Fail(error, @"Decoder layout/CPU reservation exceeds 512 MiB or buffer/index limits");
     MLPyrowaveMetalPool *pool = [MLPyrowaveMetalPool new];
     if (!pool) return Fail(error, @"Decoder retirement pool allocation failed");
     pool->layout = layout; pool->session = session; pool->configuration = configuration;

@@ -90,8 +90,9 @@ integration bound. The backend alone commits the supplied renderer queue buffer;
 the synchronous presentation borrow must encode every last reader there, without
 retaining planes/buffer, committing, enqueueing or using another queue. Completion
 retains private retirement state, not decoder/frame/UI, until all readers complete.
-Two fixed tracked heaps bound private textures and shared uploads. The 256 MiB
-session accounting reserves 128 MiB strict reassembly including scratch, 32 MiB
+Two fixed tracked heaps bound private textures and shared uploads. The original v1
+cap was 256 MiB; current session accounting has a 512 MiB hard ceiling, not a
+full-cap allocation. It reserves 128 MiB strict reassembly including scratch, 32 MiB
 validation peak, two CPU owners (each 16 MiB + 16-byte guard + offset table + 4096
 bytes), and 1 MiB bookkeeping, then charges actual heap sizes; views alias storage.
 This is not a process-RSS/driver-cache/global-memory guarantee. Configuration is

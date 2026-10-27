@@ -146,7 +146,7 @@ static void hardwareTests(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q)
     invalid(k, nil, config(), constantClock, @"queue/device mismatch");
     invalid(nil, q, config(), constantClock, @"queue/device mismatch");
     auto large = config(); large.width = large.height = 16384;
-    invalid(k, q, large, constantClock, @"256 MiB"); // Codec-valid, decoder budget rejects.
+    invalid(k, q, large, constantClock, @"512 MiB"); // Codec-valid, decoder budget rejects.
     uint64_t now = 100; // Borrowed context outlives both decoder autorelease pools.
     auto *frame = makeFrame(1);
     auto rejected = std::make_shared<CompletionState>();

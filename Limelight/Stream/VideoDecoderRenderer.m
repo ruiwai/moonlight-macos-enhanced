@@ -3059,7 +3059,7 @@ static CGDirectDisplayID getDisplayID(NSScreen* screen)
             if (!peer) fail(&failure, [@"Preflight peer factory failed: " stringByAppendingString:
                 peerError.localizedDescription ?: @"no underlying error"], peerError);
             else if (![peer canPresentWidth:configuration.width height:configuration.height])
-                fail(&failure, @"Preflight maximum source-size two-drawable budget exceeds 256 MiB or charge unavailable (high-resolution sources may still reject)", nil);
+                fail(&failure, @"Preflight maximum source-size two-drawable budget exceeds 512 MiB or charge unavailable (high-resolution sources may still reject)", nil);
             else ready = YES;
         } // No submissions: all temporary peer resources drain BEFORE publication/return.
         if (ready) {
@@ -3130,7 +3130,7 @@ static CGDirectDisplayID getDisplayID(NSScreen* screen)
             fail(&failure, @"Setup invalid backing (finite ceil 1..16384 required) or rounded-zero canvas", nil); break;
         }
         if (![peer canPresentWidth:configuration.width height:configuration.height]) {
-            fail(&failure, @"Setup maximum source-size two-drawable budget exceeds 256 MiB or charge unavailable (high-resolution sources may still reject)", nil); break;
+            fail(&failure, @"Setup maximum source-size two-drawable budget exceeds 512 MiB or charge unavailable (high-resolution sources may still reject)", nil); break;
         }
         // Dedicated transactional setup: no legacy setup, drawable acquisition or prewarm.
         _commandQueue = queue;
@@ -3170,7 +3170,7 @@ static CGDirectDisplayID getDisplayID(NSScreen* screen)
         layerContainer = nil;
         displayLayer = nil;
         if (candidate.superview != _view) [_view addSubview:candidate];
-        Log(LOG_I, @"PyroWave source=%ux%u backing=%.0fx%.0f drawable=%.0fx%.0f cap=256 MiB (maximum source-size reserve)",
+        Log(LOG_I, @"PyroWave source=%ux%u backing=%.0fx%.0f drawable=%.0fx%.0f cap=512 MiB (maximum source-size reserve)",
             configuration.width, configuration.height, backing.width, backing.height, drawable.width, drawable.height);
         ready = YES;
     } while (NO);

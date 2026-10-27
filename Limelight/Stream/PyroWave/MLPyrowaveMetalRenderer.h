@@ -27,7 +27,7 @@ NS_ASSUME_NONNULL_BEGIN
 // No allocation/submission; excludes caller's other resources/driver caches,
 // not process RSS. Runtime also checks two actual allocatedSize charges.
 // App reserves the maximum source-size canvas; bounded resize geometry alone
-// is not a memory proof and never raises the shared 256 MiB cap.
+// is not a memory proof and never raises the shared 512 MiB cap.
 - (BOOL)canPresentWidth:(NSUInteger)width height:(NSUInteger)height;
 // Synchronous borrowed public Common descriptor; returns Common CPU ack ONLY,
 // not GPU/presentation success. Independent coordinator thread-safety.
@@ -42,7 +42,7 @@ NS_ASSUME_NONNULL_BEGIN
                                           completion:(nullable MLPyrowaveMetalCompletion)completion;
 // Same pass without presentDrawable. Caller owns target and MUST NOT reuse/read
 // until completion; normal command-buffer references retain GPU resources.
-// Two target allocations are charged within the shared 256 MiB session budget;
+// Two target allocations are charged within the shared 512 MiB session budget;
 // caller must separately account any other external resources/driver caches.
 - (MLPyrowaveMetalSubmitResult)renderPendingToTexture:(nullable id<MTLTexture>)texture
                                          completion:(nullable MLPyrowaveMetalCompletion)completion;

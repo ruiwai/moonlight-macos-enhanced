@@ -91,7 +91,7 @@ Do not create a generic default device/queue. Preflight the injected device, req
 Compile the exact pinned dequant + FP32 IDWT kernels with notices preserved; do not feed untrusted input through the unsafe upstream Metal parser/API.
 Use validated offsets only: they are **BYTE offsets** into the full original frame. Divide valid offsets by four only for an unchanged whole-frame upload.
 Preserve `UINT32_MAX` absent entries and the 16 initialized zero guard bytes; validate alignment/read bounds, payload base and sparse/zero-band initialization.
-Use at most **four leases + one waiting frame**, **256 MiB total session-owned CPU/GPU allocation accounting**, including reconfiguration overlap.
+Use at most **four leases + one waiting frame**, **512 MiB total session-owned CPU/GPU allocation accounting**, including reconfiguration overlap (current cap; v1 originally used 256 MiB).
 Charge the reassembly wrapper's conservative **128 MiB upper bound**, codec validation peak **32 MiB**, waiting ownership, upload/offset buffers, intermediates and outputs;
 avoid double-counting shared allocations but never omit simultaneous peaks, alignment/guards or retirement overlap. Protected frame <=16 MiB; metadata <=65535 bytes.
 Checked exact-footprint preflight may reject otherwise library-valid even dimensions (2..16384); do not promise all library-valid sizes fit.

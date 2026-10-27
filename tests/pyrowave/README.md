@@ -269,7 +269,7 @@ Non-memoryless storage (stored result required). Fractional viewport; texture-bo
 inward scissor uses ceil(left/top), floor(right/bottom); empty fit preserves pending.
 BT.709 full/limited range and center/left chroma; no sRGB/gamma transform. Caller
 layer MUST use `kCGColorSpaceITUR_709` with SDR/EDR off. Caller accounts external
-targets within the existing 256 MiB session budget and cannot reuse/read them
+targets within the shared 512 MiB session budget and cannot reuse/read them
 until completion; command-buffer references retain resources. Decoder alone commits.
 Clock/context must outlive the renderer and be thread-safe/nonreentrant.
 The 3-minute strict C++14 ARC Werror ASan/UBSan step links actual sources and explicit
@@ -284,6 +284,9 @@ nonzero coefficients, encoder pixel correctness or Metal validation.
 UI/drawable and Busy timing untested; offscreen shares pass. Explicit opt-in is experimental, not proven GPU correctness or interoperability.
 The app bounds the drawable canvas to both source and backing dimensions (no
 upscale); the compositor scales it to the window. Preflight/setup reserve two
-maximum source-size canvases, not full Retina backing. The 256 MiB cap is unchanged
-and high-resolution sources can still fail. CPU selector cases precede the GPU
-probe; geometry checks do not establish allocation or native UI correctness.
+maximum source-size canvases, not full Retina backing. The hard cap is 512 MiB,
+not a full-cap allocation; actual CPU/heaps/two-target charges must still fit.
+CPU selector cases include 1080p/1440p/4K on 4K/5K/small backings before the GPU
+probe. A separate drained-session hardware loop creates actual SDR renderers for
+720p/1080p/1440p/4K and checks source-size presentation admission, with no submissions.
+Supported-device failures fail; this is allocation smoke, not pixel/UI correctness.

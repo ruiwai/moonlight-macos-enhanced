@@ -26,7 +26,8 @@ static inline int MLPyrowaveSelectDrawableSize(uint32_t sourceW, uint32_t source
     return 1;
 }
 
-static const uint64_t MLPyrowaveSessionAllocationCap = UINT64_C(256) * 1024 * 1024;
+// Hard ceiling, not a reservation: actual heaps/targets follow source resolution.
+static const uint64_t MLPyrowaveSessionAllocationCap = UINT64_C(512) * 1024 * 1024;
 // Allocation charges only, not RSS. Unknown/zero charges are not admissible.
 static inline int MLPyrowavePresentationFitsBudget(uint64_t sessionBytes,
     uint64_t textureBytes, uint64_t textureCount)
