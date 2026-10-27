@@ -176,6 +176,18 @@ jobs:
           "$RUNNER_TEMP/pyrowave-draw-gate-c"
           "$RUNNER_TEMP/pyrowave-draw-gate-cpp"
 
+      - name: Compile and run portable event stats (no GPU skip)
+        env:
+          ASAN_OPTIONS: halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          flags=(-Wall -Wextra -Werror -pedantic -g -O1 '-fsanitize=address,undefined'
+                 -fno-sanitize-recover=all -fno-omit-frame-pointer -I Limelight/Stream/PyroWave)
+          xcrun clang -std=c11 "${flags[@]}" tests/pyrowave/test_stats.c -o "$RUNNER_TEMP/stats-c"
+          xcrun clang++ -x c++ -std=c++14 "${flags[@]}" tests/pyrowave/test_stats.c -o "$RUNNER_TEMP/stats-cpp"
+          "$RUNNER_TEMP/stats-c"
+          "$RUNNER_TEMP/stats-cpp"
+
       - name: Compile and probe Metal pipelines (not decode pixels)
         env:
           ASAN_OPTIONS: halt_on_error=1

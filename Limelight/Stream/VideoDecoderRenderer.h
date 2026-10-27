@@ -37,7 +37,8 @@ typedef struct {
   uint64_t measurementStartTimestamp;
   uint64_t lastUpdatedTimestamp;
 
-  // Bytes of video payload received during this measurement window.
+  // Bytes of video payload received during this measurement window. PyroWave:
+  // inner callback bytes including fragments/FEC, NOT outer wire bandwidth.
   // Can be used to estimate current bitrate.
   uint64_t receivedBytes;
 
@@ -82,6 +83,9 @@ typedef struct {
 // as rendered (the moment hasPresentedVideo turns true); 0 until then.
 @property(nonatomic, readonly) uint64_t firstDecodeInputMs;
 @property(nonatomic, readonly) uint64_t firstFramePresentedMs;
+// PyroWave progress in LiGetMillis() epoch; independent of window resets.
+@property(nonatomic, readonly) uint64_t lastPyrowaveDecodedMs;
+@property(nonatomic, readonly) uint64_t lastPyrowavePresentedMs;
 // Called once, on an arbitrary thread, when the first frame counts as rendered. Not called
 // when that already happened before it was set; check hasPresentedVideo after setting it.
 @property(copy) void (^firstFramePresentedHandler)(void);

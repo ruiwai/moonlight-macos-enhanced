@@ -290,15 +290,20 @@ bool EncodeIDWT(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
     if (!enc) return false;
     enc.label = @"PyroWave IDWT";
     [enc setSamplerState:p->kernels.sampler atIndex:0];
+    id<MTLComputePipelineState> currentPipeline = nil;
     for (int l = 4; l >= 0; --l) {
         if (l != 4) [enc memoryBarrierWithScope:MTLBarrierScopeTextures];
         IdwtPush push = {{int32_t(p->layout.height[l]), int32_t(p->layout.width[l])},
             {1.0f / p->layout.height[l], 1.0f / p->layout.width[l]}};
+        [enc setBytes:&push length:sizeof(push) atIndex:0];
         for (unsigned c = 0; c < (l == 0 ? 1u : 3u); ++c) {
             const bool final = l == 0 || (l == 1 && c != 0);
             id<MTLTexture> output = final ? p->planes[c] : p->ll[c][l - 1];
-            [enc setComputePipelineState:final ? p->kernels.idwtFinal : p->kernels.idwt];
-            [enc setBytes:&push length:sizeof(push) atIndex:0];
+            id<MTLComputePipelineState> nextPipeline = final ? p->kernels.idwtFinal : p->kernels.idwt;
+            if (nextPipeline != currentPipeline) {
+                [enc setComputePipelineState:nextPipeline];
+                currentPipeline = nextPipeline;
+            }
             [enc setTexture:p->layers[c][l] atIndex:0];
             [enc setTexture:output atIndex:1];
             [enc dispatchThreadgroups:MTLSizeMake((push.resolution[0] + 15) / 16,

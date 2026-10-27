@@ -1990,4 +1990,4 @@
 "Hosts using Default %d" = "%d hosts use these settings";
 "Reset to Default Profile…" = "Reset to Default Profile…";
 "PyroWave (Experimental)" = "PyroWave (Experimental)";
-"Video codec warning PyroWave experimental" = "Experimental Apple Silicon Metal path: SDR BT.709, 8-bit 4:2:0 only. Saved HDR, 10-bit, 4:4:4 and renderer preferences are unchanged; session overrides apply. Falls back initially to H.264 if unavailable. GPU correctness and host interoperability are unverified.";
+"Video codec warning PyroWave experimental" = "Experimental dedicated Apple Silicon Metal path: SDR BT.709, 8-bit 4:2:0 only, source-bounded drawable and latest-frame scheduling. Inapplicable renderer, HDR, quality enhancement, advanced video and frame pacing controls are locked; saved legacy preferences are unchanged and restored when you deselect PyroWave. Resolution, FPS and bitrate remain adjustable. Falls back initially to H.264 if unavailable. GPU correctness and host interoperability are unverified.";

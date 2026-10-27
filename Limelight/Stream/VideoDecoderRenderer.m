@@ -16,6 +16,7 @@
 #import "PyroWave/MLPyrowaveMetalRenderer.h"
 #include "PyroWave/MLPyrowavePresentationBudget.h"
 #include "PyroWave/MLPyrowaveDrawGate.h"
+#include "PyroWave/MLPyrowaveStats.h"
 
 #include "Limelight.h"
 #include <math.h>
@@ -1509,6 +1510,7 @@ static BOOL MLGetSharedMetalPipelines(MTLPixelFormat pixelFormat,
     int _pyrowavePreflightFrameRate;
     id<MTLCommandQueue> _pyrowavePreflightQueue;
     uint64_t _pyrowaveEpoch;
+    MLPyrowaveStats _pyrowaveStats; // Access only under @synchronized(self).
     NSUInteger _lastLoggedDrawableWidth;
     NSUInteger _lastLoggedDrawableHeight;
     OSType _lastLoggedDecodedPixelFormat;
@@ -1555,9 +1557,36 @@ static BOOL MLGetSharedMetalPipelines(MTLPixelFormat pixelFormat,
 }
 
 @synthesize videoFormat;
+@synthesize videoStats = _videoStats;
+
+- (VideoStats)videoStats { @synchronized (self) { return _videoStats; } }
+- (uint64_t)lastPyrowaveDecodedMs { @synchronized (self) { return _pyrowaveStats.lastDecodedMs; } }
+- (uint64_t)lastPyrowavePresentedMs { @synchronized (self) { return _pyrowaveStats.lastPresentedMs; } }
+
+// Caller holds @synchronized(self). Never touches the legacy accumulator.
+- (void)recordPyrowaveEvent:(unsigned)event at:(uint64_t)now bytes:(uint64_t)bytes decodeMs:(uint64_t)decodeMs {
+    MLPyrowaveStatsEvent(&_pyrowaveStats, now, event, bytes, decodeMs);
+    MLPyrowaveStatsWindow w = _pyrowaveStats.window;
+    VideoStats stats = _videoStats; // Preserve render metrics between presentation events.
+    stats.receivedFrames = stats.totalFrames = w.frames[MLPyrowaveStatsValidated];
+    stats.decodedFrames = w.frames[MLPyrowaveStatsDecoded];
+    stats.renderedFrames = w.frames[MLPyrowaveStatsPresented];
+    stats.totalFps = stats.receivedFps = MLPyrowaveStatsRate(&_pyrowaveStats, MLPyrowaveStatsValidated);
+    stats.decodedFps = MLPyrowaveStatsRate(&_pyrowaveStats, MLPyrowaveStatsDecoded);
+    stats.renderedFps = MLPyrowaveStatsRate(&_pyrowaveStats, MLPyrowaveStatsPresented);
+    stats.receivedBytes = w.bytes;
+    stats.totalDecodeTime = w.decodeMs; // Submission-to-completion wall time, NOT GPU execution time.
+    stats.measurementStartTimestamp = w.startMs;
+    stats.lastUpdatedTimestamp = w.lastMs;
+    if (event == MLPyrowaveStatsPresented) [self applyRenderPacingMetricsToStats:&stats];
+    _videoStats = stats;
+}
 
 - (BOOL)hasPresentedVideo
 {
+    if (videoFormat == VIDEO_FORMAT_PYROWAVE) {
+        @synchronized (self) { return _firstFramePresentedMs != 0; }
+    }
     if (_activeRendererMode == MLActiveVideoRendererModeEnhanced) {
         return _videoStats.renderedFrames > 0;
     }
@@ -2042,6 +2071,9 @@ static CGDirectDisplayID getDisplayID(NSScreen* screen)
     if (preciseNowMs > _lastRenderedSampleTimeMs) _lastRenderedSampleTimeMs = preciseNowMs;
     if (enqueueTimeMs != 0) _lastRenderedEnqueueTimeMs = enqueueTimeMs;
 
+    if (_pyrowaveMode) {
+        [self recordPyrowaveEvent:MLPyrowaveStatsPresented at:renderSampleNowMs bytes:0 decodeMs:0];
+    } else {
     _activeWndVideoStats.renderedFrames++;
     if (enqueueTimeMs != 0 && renderSampleNowMs >= enqueueTimeMs) {
         _activeWndVideoStats.totalRenderTime += renderSampleNowMs - enqueueTimeMs;
@@ -2052,6 +2084,7 @@ static CGDirectDisplayID getDisplayID(NSScreen* screen)
     [self applyRenderPacingMetricsToStats:&snapshotStats];
     snapshotStats.lastUpdatedTimestamp = renderSampleNowMs;
     _videoStats = snapshotStats;
+    }
 
     if (_firstFramePresentedMs == 0) {
         // Same moment hasPresentedVideo turns true: the enhanced path counts frames only
@@ -3166,6 +3199,11 @@ static CGDirectDisplayID getDisplayID(NSScreen* screen)
         _pyrowaveEpoch++;
         MLPyrowaveDrawGateReset(&_pyrowaveDrawGate);
         _pyrowaveMode = YES;
+        @synchronized (self) {
+            _pyrowaveStats = (MLPyrowaveStats){0};
+            _videoStats = (VideoStats){0};
+            _firstDecodeInputMs = _firstFramePresentedMs = 0;
+        }
         self->videoFormat = VIDEO_FORMAT_PYROWAVE;
         _activeRendererMode = MLActiveVideoRendererModeEnhanced;
         [layerContainer removeFromSuperview];
@@ -3219,8 +3257,16 @@ static CGDirectDisplayID getDisplayID(NSScreen* screen)
 {
     [_decodeSubmitLock lock];
     int result = LI_PYROWAVE_PACKET_IGNORED;
-    if (!_decoderStopped && _pyrowaveMode && _pyrowavePeer)
+    if (!_decoderStopped && _pyrowaveMode && _pyrowavePeer) {
+        uint64_t now = LiGetMillis();
         result = [_pyrowavePeer submitPacket:packet];
+        if (packet && packet->data) { @synchronized (self) {
+            BOOL validated = result == LI_PYROWAVE_PACKET_VALIDATED_FRAME;
+            if (validated && _firstDecodeInputMs == 0) _firstDecodeInputMs = now;
+            [self recordPyrowaveEvent:validated ? MLPyrowaveStatsValidated : MLPyrowaveStatsPacket
+                                  at:now bytes:packet->length decodeMs:0];
+        } }
+    }
     if (result == LI_PYROWAVE_PACKET_VALIDATED_FRAME) {
         _pyrowaveDrawGate.pending = true;
         [self requestPyrowaveDrawLocked];
@@ -5300,13 +5346,14 @@ void decompressionOutputCallback(void *decompressionOutputRefCon, void *sourceFr
         __weak VideoDecoderRenderer *weakSelf = self;
         [drawable addPresentedHandler:^(id<MTLDrawable> presented) {
             double time = presented.presentedTime;
+            uint64_t presentedMs = LiGetMillis();
             void (^record)(void) = ^{
                 VideoDecoderRenderer *renderer = weakSelf;
                 if (!renderer) return;
                 [renderer->_decodeSubmitLock lock];
                 if (!renderer->_decoderStopped && renderer->_pyrowaveMode &&
                     renderer->_pyrowaveEpoch == epoch && time > 0)
-                    [renderer recordRenderedFrameSampleAtTimeMs:LiGetMillis()
+                    [renderer recordRenderedFrameSampleAtTimeMs:presentedMs
                         enqueueTimeMs:0 presentationTimeSeconds:time];
                 [renderer->_decodeSubmitLock unlock];
             };
@@ -5314,7 +5361,20 @@ void decompressionOutputCallback(void *decompressionOutputRefCon, void *sourceFr
             else dispatch_async(dispatch_get_main_queue(), record);
         }];
         // Backend is sole commit owner. GPU completion is NOT display ack.
+        uint64_t submitMs = LiGetMillis();
         MLPyrowaveMetalSubmitResult result = [peer renderPendingToDrawable:drawable completion:^(BOOL success) {
+            uint64_t completedMs = LiGetMillis(); // Capture before main-queue delay.
+            VideoDecoderRenderer *owner = weakSelf;
+            if (success && owner) {
+                [owner->_decodeSubmitLock lock];
+                if (!owner->_decoderStopped && owner->_pyrowaveMode && owner->_pyrowaveEpoch == epoch) {
+                    @synchronized (owner) {
+                        [owner recordPyrowaveEvent:MLPyrowaveStatsDecoded at:completedMs bytes:0
+                                         decodeMs:MLPyrowaveStatsDuration(submitMs, completedMs)];
+                    }
+                }
+                [owner->_decodeSubmitLock unlock];
+            }
             dispatch_async(dispatch_get_main_queue(), ^{
                 VideoDecoderRenderer *renderer = weakSelf;
                 if (!renderer) return;

@@ -3,6 +3,9 @@ import SwiftUI
 struct VideoView: View {
   @EnvironmentObject private var settingsModel: SettingsModel
   @ObservedObject private var languageManager = LanguageManager.shared
+  private var pyrowaveSelected: Bool {
+    settingsModel.selectedVideoCodec == "PyroWave (Experimental)"
+  }
   private var metalSelected: Bool {
     SettingsModel.normalizedVideoRendererMode(settingsModel.selectedVideoRendererMode) == "Metal Renderer"
   }
@@ -80,6 +83,7 @@ struct VideoView: View {
           .controllerPicker(selection: $settingsModel.selectedVideoRendererMode, options: SettingsModel.videoRendererModes, title: { mode in languageManager.localize(mode) })
           .frame(width: 220, alignment: .trailing)
         }
+        .disabled(pyrowaveSelected)
 
         // AV1 in software is 8-bit SDR: the two switches below do nothing then, and say so.
         if av1SoftwareSelected {
@@ -95,11 +99,11 @@ struct VideoView: View {
           .padding(.vertical, 6)
         }
         ToggleCell(title: "HDR", hintKey: "HDR detail", boolBinding: $settingsModel.hdr)
-          .disabled(av1SoftwareSelected)
+          .disabled(pyrowaveSelected || av1SoftwareSelected)
         ToggleCell(title: "YUV 4:4:4", hintKey: "YUV444 detail", boolBinding: $settingsModel.enableYUV444)
-          .disabled(av1SoftwareSelected)
+          .disabled(pyrowaveSelected || av1SoftwareSelected)
         ToggleCell(title: "10-bit SDR", hintKey: "10-bit SDR detail", boolBinding: $settingsModel.enable10BitSdr)
-          .disabled(av1SoftwareSelected)
+          .disabled(pyrowaveSelected || av1SoftwareSelected)
 
 
         SettingsRow(title: "Transfer Function") {
@@ -112,6 +116,7 @@ struct VideoView: View {
           .controllerPicker(selection: $settingsModel.selectedHdrTransferFunction, options: SettingsModel.hdrTransferFunctions, title: { value in languageManager.localize(value) })
           .frame(width: 190, alignment: .trailing)
         }
+        .disabled(pyrowaveSelected)
 
         SettingsRow(title: "Dynamic HDR Preference") {
           Picker("", selection: $settingsModel.selectedDynamicHdrPreference) {
@@ -123,6 +128,7 @@ struct VideoView: View {
           .controllerPicker(selection: $settingsModel.selectedDynamicHdrPreference, options: SettingsModel.dynamicHdrPreferences, title: { value in languageManager.localize(value) })
           .frame(width: 190, alignment: .trailing)
         }
+        .disabled(pyrowaveSelected)
 
         if let chromaNoteKey = settingsModel.dynamicHdrChromaNoteKey {
           SettingDescriptionRow(textKey: chromaNoteKey)
@@ -156,6 +162,7 @@ struct VideoView: View {
         }
         }
       }
+      .disabled(pyrowaveSelected)
       }
 
       FormSection(title: "HDR Display Profile") {
@@ -214,6 +221,7 @@ struct VideoView: View {
           tint: .secondary
         )
       }
+      .disabled(pyrowaveSelected)
 
       FormSection(title: "HDR Capabilities") {
         ForEach(settingsModel.capabilityItemsAdjustedForChroma(settingsModel.videoCapabilityMatrix.items.filter {
@@ -228,6 +236,7 @@ struct VideoView: View {
         CompactVideoCapabilitySection(title: "Quality Enhancement", items: settingsModel.videoCapabilityMatrix.items.filter { $0.id.hasPrefix("enhancement.") })
       }
       VideoAdvancedSettingsSection()
+        .disabled(pyrowaveSelected)
 
       FormSection(title: "Frame Pacing") {
         SettingsRow(title: "Pacing") {
@@ -259,6 +268,7 @@ struct VideoView: View {
         ToggleCell(title: "SDR Compatibility Workaround", boolBinding: $settingsModel.timingSdrCompatibilityWorkaround)
         SettingsStatusRow(title: "Runtime", value: languageManager.localize(settingsModel.videoRuntimeStatusSummaryKey), tint: .secondary)
       }
+      .disabled(pyrowaveSelected)
     }
   }
 }

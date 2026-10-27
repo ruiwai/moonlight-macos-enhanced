@@ -5,6 +5,13 @@
 
 #import "StreamViewController_Internal.h"
 #include "DynamicHdr.h"
+#include "../../Stream/PyroWave/MLPyrowaveStats.h"
+
+static double MLHudBitrateMbps(VideoStats stats, BOOL pyrowave) {
+    double seconds = pyrowave ? MLPyrowaveStatsDuration(stats.measurementStartTimestamp,
+                                                       stats.lastUpdatedTimestamp) / 1000.0 : 1.0;
+    return seconds > 0 ? stats.receivedBytes * 8.0 / 1000000.0 / seconds : 0;
+}
 
 // Host-selected dynamic HDR format (X-SS-Dynamic-HDR) as overlay text.
 static NSString *MLDynamicHdrFormatDisplayName(int format) {
@@ -900,7 +907,8 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
     [self stopAdaptiveBitrate];
 
     StreamConfiguration *config = self.streamMan.streamConfiguration;
-    if (config == nil || !config.enableAdaptiveBitrate) {
+    if (config == nil || !config.enableAdaptiveBitrate ||
+        self.streamMan.connection.renderer.videoFormat == VIDEO_FORMAT_PYROWAVE) {
         return;
     }
 
@@ -922,6 +930,7 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
     }
 
     VideoStats stats = self.streamMan.connection.renderer.videoStats;
+    BOOL pyrowave = self.streamMan.connection.renderer.videoFormat == VIDEO_FORMAT_PYROWAVE;
     uint64_t nowStatsMs = LiGetMillis();
     uint64_t elapsedMs = 0;
     if (stats.measurementStartTimestamp > 0 && nowStatsMs >= stats.measurementStartTimestamp) {
@@ -929,6 +938,7 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
     }
 
     float (^displayedFps)(float, uint32_t) = ^float(float completedFps, uint32_t frameCount) {
+        if (pyrowave) return completedFps;
         if (completedFps > 0.05f) {
             return completedFps;
         }
@@ -938,7 +948,7 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
         return (float)((double)frameCount / MAX(0.001, (double)elapsedMs / 1000.0));
     };
 
-    if (self.adaptiveBitrateController != nil) {
+    if (!pyrowave && self.adaptiveBitrateController != nil) {
         uint32_t abrRtt = 0;
         PML_CONTROL_STREAM_CONTEXT abrControlCtx = (PML_CONTROL_STREAM_CONTEXT)[self.streamMan.connection controlStreamContext];
         MLGetUsableRttInfo(abrControlCtx, &abrRtt, NULL);
@@ -978,7 +988,7 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
         // line shows what the network did in the last interval.
         MLNetworkStatsSnapshot net = {0};
         MLNetworkStatsSnapshot prevNet = self.lastPerfNetStats;
-        BOOL haveNet = [self.streamMan.connection getNetworkStatsSnapshot:&net];
+        BOOL haveNet = !pyrowave && [self.streamMan.connection getNetworkStatsSnapshot:&net];
         NSString *netFields = @"";
         if (haveNet) {
             netFields = [NSString stringWithFormat:@" rtp=%u fecRec=%u fecFail=%u oos=%u netLoss=%.2f",
@@ -995,7 +1005,16 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
             }
             self.lastPerfNetStats = net;
         }
-        Log(LOG_I, @"[perf] fps rx=%.1f de=%.1f rd=%.1f low1=%.1f pace=%.2f p99=%.1f max=%.1f stalls=%u srcGaps=%u "
+        if (pyrowave) {
+            Log(LOG_I, @"[perf] PyroWave fps rx=%.1f de=%.1f rd=%.1f low1=%.1f pace=%.2f p99=%.1f max=%.1f stalls=%u "
+                "submitToCompleteWallMs=%@ innerRxMbps=%.2f "
+                "host=N/A netLoss=N/A fec=N/A jit=N/A rtt=%@",
+                stats.receivedFps, stats.decodedFps, stats.renderedFps,
+                stats.renderedFpsOnePercentLow, stats.renderFramePacingJitterMs,
+                stats.renderIntervalP99Ms, stats.renderIntervalMaxMs, stats.renderStallCount,
+                stats.decodedFrames ? [NSString stringWithFormat:@"%.2f", (double)stats.totalDecodeTime / stats.decodedFrames] : @"N/A",
+                MLHudBitrateMbps(stats, YES), [self currentLatencyLogSummary]);
+        } else Log(LOG_I, @"[perf] fps rx=%.1f de=%.1f rd=%.1f low1=%.1f pace=%.2f p99=%.1f max=%.1f stalls=%u srcGaps=%u "
             "decode=%.2f queue=%.2f host=%.1f netDrop=%u pacerDrop=%u jit=%.1f br=%.1f audioUnderruns=%llu%@",
             displayedFps(stats.receivedFps, stats.receivedFrames),
             displayedFps(stats.decodedFps, stats.decodedFrames),
@@ -1008,7 +1027,7 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
             stats.framesWithHostProcessingLatency > 0
                 ? (float)stats.totalHostProcessingLatency / 10.0f / stats.framesWithHostProcessingLatency : 0.0f,
             stats.networkDroppedFrames, stats.pacerDroppedFrames, stats.jitterMs,
-            (double)stats.receivedBytes * 8.0 / 1000.0 / 1000.0,
+            MLHudBitrateMbps(stats, NO),
             (unsigned long long)[self.streamMan.connection audioUnderrunCount],
             netFields);
     }
@@ -1073,6 +1092,8 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
     [self publishPerformanceDiagnosticsSnapshot];
     [self pollClientSdrWhite];
     VideoStats stats = self.streamMan.connection.renderer.videoStats;
+    VideoDecoderRenderer *renderer = self.streamMan.connection.renderer;
+    BOOL pyrowave = renderer.videoFormat == VIDEO_FORMAT_PYROWAVE;
     uint64_t nowMs = [self nowMs];
     uint64_t nowStatsMs = LiGetMillis();
     BOOL statsTimestampValid = (stats.lastUpdatedTimestamp > 0 && nowStatsMs >= stats.lastUpdatedTimestamp);
@@ -1125,13 +1146,15 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
         self.streamHealthFrozenStatsStreak = 0;
     }
 
-    if ((hasPayloadInWindow || hasProgressSinceLast) && stats.decodedFrames == 0) {
+    BOOL decodeProgress = pyrowave ? MLPyrowaveStatsRecent(renderer.lastPyrowaveDecodedMs, nowStatsMs) : stats.decodedFrames > 0;
+    BOOL renderProgress = pyrowave ? MLPyrowaveStatsRecent(renderer.lastPyrowavePresentedMs, nowStatsMs) : stats.renderedFrames > 0;
+    if ((hasPayloadInWindow || hasProgressSinceLast) && !decodeProgress) {
         self.streamHealthNoDecodeStreak += 1;
     } else {
         self.streamHealthNoDecodeStreak = 0;
     }
 
-    if (stats.decodedFrames > 0 && stats.renderedFrames == 0) {
+    if (decodeProgress && !renderProgress) {
         self.streamHealthNoRenderStreak += 1;
     } else {
         self.streamHealthNoRenderStreak = 0;
@@ -1294,7 +1317,7 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
         routeIsTunnel = [Utils isTunnelInterfaceName:[Utils outboundInterfaceNameForAddress:self.app.host.activeAddress sourceAddress:nil]];
     }
 
-    if (autoAdjustBitrate && routeIsTunnel && self.runtimeAutoBitrateCapKbps > 0 && self.runtimeAutoBitrateBaselineKbps > self.runtimeAutoBitrateCapKbps) {
+    if (!pyrowave && autoAdjustBitrate && routeIsTunnel && self.runtimeAutoBitrateCapKbps > 0 && self.runtimeAutoBitrateBaselineKbps > self.runtimeAutoBitrateCapKbps) {
         BOOL stableWindow = (statsFresh || hasProgressSinceLast) &&
                             stats.totalFrames >= 120 &&
                             dropRate < 3.0f &&
@@ -1826,6 +1849,7 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
 
     VideoStats stats = self.streamMan.connection.renderer.videoStats;
     int videoFormat = self.streamMan.connection.renderer.videoFormat;
+    BOOL pyrowave = videoFormat == VIDEO_FORMAT_PYROWAVE;
 
     BOOL hasVideoData = (stats.receivedFrames > 0 ||
                          stats.decodedFrames > 0 ||
@@ -1871,6 +1895,7 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
     }
 
     float (^displayedFps)(float, uint32_t) = ^float(float completedFps, uint32_t frameCount) {
+        if (pyrowave) return completedFps;
         if (completedFps > 0.05f) {
             return completedFps;
         }
@@ -1905,7 +1930,7 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
     float framePacingJitter = stats.renderFramePacingJitterMs;
 
     // Approximate current video bitrate over the last measurement window (≈1s)
-    double bitrateMbps = (double)stats.receivedBytes * 8.0 / 1000.0 / 1000.0;
+    double bitrateMbps = MLHudBitrateMbps(stats, pyrowave);
     
     float renderTime = stats.renderedFrames > 0 ? (float)stats.totalRenderTime / stats.renderedFrames : 0;
     float decodeTime = stats.decodedFrames > 0 ? (float)stats.totalDecodeTime / stats.decodedFrames : 0;
@@ -1923,7 +1948,7 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
         streamLatencyApproximate = YES;
     }
     float streamLatencyMs = pipelineTime + transportOneWayMs;
-    BOOL streamLatencyAvailable = (pipelineTime > 0.0f) || hasTransportEstimate;
+    BOOL streamLatencyAvailable = !pyrowave && ((pipelineTime > 0.0f) || hasTransportEstimate);
     
     NSMutableAttributedString *attrString = [[NSMutableAttributedString alloc] init];
     
@@ -1984,13 +2009,15 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
         append(MLString(@"Not Available", nil), valueAttrs);
     }
     append(@"  Loss ", labelAttrs);
-    append([NSString stringWithFormat:@"%.2f%%", loss], valueAttrs);
+    append(pyrowave ? @"N/A" : [NSString stringWithFormat:@"%.2f%%", loss], valueAttrs);
+    if (pyrowave) append(rttAvailable ? [NSString stringWithFormat:@"  RTT %u ms", rtt] : @"  RTT N/A", valueAttrs);
 
     // Network-side loss from common-c (3 s window, excludes decoder drops) and
     // cumulative RS FEC outcomes. The feedback pair is what this client last
     // reported to the host; it only exists when the host accepted FEC control.
     MLNetworkStatsSnapshot net = {0};
-    if ([self.streamMan.connection getNetworkStatsSnapshot:&net]) {
+    if (pyrowave) append(@"  Net/FEC N/A", valueAttrs);
+    else if ([self.streamMan.connection getNetworkStatsSnapshot:&net]) {
         append(@"  Net ", labelAttrs);
         append([NSString stringWithFormat:@"%.2f%%", net.networkFrameLossPercent], valueAttrs);
         if (net.fecRecovered > 0 || net.fecFailed > 0) {
@@ -2008,8 +2035,8 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
     }
 
     append(@"  Jit ", labelAttrs);
-    append([NSString stringWithFormat:@"%.1f", jitter], valueAttrs);
-    append(@" ms  Br ", labelAttrs);
+    append(pyrowave ? @"N/A" : [NSString stringWithFormat:@"%.1f", jitter], valueAttrs);
+    append(pyrowave ? @"  Inner Rx " : @" ms  Br ", labelAttrs);
     append([NSString stringWithFormat:@"%.1f", bitrateMbps], valueAttrs);
     append(@" Mbps", labelAttrs);
     append(@"  Pace ", labelAttrs);
@@ -2026,15 +2053,15 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
     append(@"  |  ", labelAttrs);
     append(MLString(@"Pipeline", nil), labelAttrs);
     append(@" ", labelAttrs);
-    append([NSString stringWithFormat:@"%.2f", pipelineTime], valueAttrs);
+    append(pyrowave ? @"N/A" : [NSString stringWithFormat:@"%.2f", pipelineTime], valueAttrs);
     append(@" ms · ", labelAttrs);
     append(MLString(@"Host", nil), labelAttrs);
     append(@" ", labelAttrs);
-    append([NSString stringWithFormat:@"%.1f", encodeTime], valueAttrs);
-    append(@" ms · Decode ", labelAttrs);
-    append([NSString stringWithFormat:@"%.2f", decodeTime], valueAttrs);
+    append(pyrowave ? @"N/A" : [NSString stringWithFormat:@"%.1f", encodeTime], valueAttrs);
+    append(pyrowave ? @" · Submit→complete (wall) " : @" ms · Decode ", labelAttrs);
+    append(pyrowave && stats.decodedFrames == 0 ? @"N/A" : [NSString stringWithFormat:@"%.2f", decodeTime], valueAttrs);
     append(@" ms · Queue ", labelAttrs);
-    append([NSString stringWithFormat:@"%.2f", renderTime], valueAttrs);
+    append(pyrowave ? @"N/A" : [NSString stringWithFormat:@"%.2f", renderTime], valueAttrs);
     append(@" ms", labelAttrs);
 
     if (self.streamHealthNoPayloadStreak > 0) {

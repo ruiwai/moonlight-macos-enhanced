@@ -48,6 +48,24 @@
    behavior separately. Do not infer PyroWave performance from H.264 fallback:
    the ordinary legacy risk assessment is deliberately skipped for index 3.
 
+## Settings lock smoke check (macOS; not yet run)
+
+- Save nondefault legacy renderer, HDR/4:4:4/10-bit, transfer/dynamic HDR,
+  display profile, enhancement, advanced video and custom timing preferences.
+  Select PyroWave: those controls/sections must be disabled for pointer and
+  controller input, while the codec picker remains enabled. Existing renderer-
+  dependent visibility and AV1 software restrictions remain unchanged.
+- Effective PyroWave uses dedicated Metal SDR BT.709 8-bit 4:2:0, a drawable
+  bounded by source and backing dimensions, and latest-frame scheduling, not
+  legacy enhancement/timing settings. This UI lock does not fix visual effects
+  or establish measured GPU correctness.
+- Resolution/FPS/bitrate and network/audio/input settings must remain adjustable.
+  Deselect PyroWave and verify saved legacy values are restored without writes
+  from the lock. Repeat in English and Simplified Chinese.
+- `controllerPicker` reads SwiftUI `isEnabled` into its anchor; the navigator
+  excludes disabled anchors. Parent `.disabled` covers section descendants;
+  verify controller navigation and selection on macOS, not just the dimmed UI.
+
 ## Evidence boundary
 
 The vanilla host supports VRR, cursor and HDR features; this client slice is

@@ -1,5 +1,14 @@
 # PyroWave prerequisites (CI only)
 
+## HUD event stats (portable CPU checks)
+`test_stats.c` tests the app's pure `MLPyrowaveStats.h` accumulator in strict
+C11 and C++14 with fatal ASan/UBSan: real-duration window rates, retained rates
+across short windows, bytes/validated/GPU/presented separation, stalled freshness,
+and zero/backwards-clock guards. CI runs it without Metal or exit-77 skips.
+PyroWave bytes are inner callback traffic including fragments/FEC, not wire
+bandwidth; decode timing is submission-to-GPU-completion wall time, not GPU time.
+App locking, stop/epoch guards and actual presentation still require macOS checks.
+
 ## App draw gate (standalone CPU unit checks)
 `test_draw_gate.c` exercises the production pure-C notification/admission helper:
 coalescing, pending while GPU-busy, completion wakeup, no nil-drawable/Busy spin,
@@ -266,6 +275,9 @@ Presentation blits all three correctly shaped R8Unorm planes to a shared buffer 
 256-byte rows; it never retains planes/command buffers or reenters decoder controls.
 This is synthetic dispatch/lifetime smoke, NOT pixel correctness, Metal validation,
 real encoder conformance, deterministic Busy coverage, streaming or feature readiness.
+
+IDWT caches pipeline bindings and sets shared push bytes once per level for an
+unmeasured CPU encoding-overhead reduction; this is not a GPU throughput claim.
 
 ## Standalone SDR Metal renderer (not live enablement)
 `MLPyrowaveMetalRenderer` is an opt-in peer consuming public coordinator packets,
