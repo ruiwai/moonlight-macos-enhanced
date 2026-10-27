@@ -142,6 +142,126 @@ static MLPyrowaveMetalDecoder *create(MLPyrowaveMetalKernels *k, id<MTLCommandQu
     CHECK(c.range == 0 && c.siting == 0 && c.generation == 1);
     return decoder;
 }
+// Batching equivalence only: same dequant pipeline, NOT encoder/IDWT goldens.
+static void finishGPU(id<MTLCommandBuffer> cmd)
+{
+    CHECK(cmd);
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    [cmd addCompletedHandler:^(id<MTLCommandBuffer>) { dispatch_semaphore_signal(done); }];
+    [cmd commit];
+    CHECK(dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) == 0);
+    CHECK(cmd.status == MTLCommandBufferStatusCompleted && !cmd.error);
+}
+static void dequantBatchCase(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q,
+    NSUInteger width, NSUInteger height, unsigned bandCount, bool sparseOnly)
+{
+    struct Push { int32_t resolution[2], outputLayer, blockOffset, blockStride, blockLayerStride; };
+    static_assert(sizeof(Push) == 24, "Dequant ABI including former padding");
+    const unsigned firstBand = 4 - bandCount, base = 3;
+    const unsigned blocksX = (width + 31) / 32, blocksY = (height + 31) / 32;
+    const unsigned layerStride = blocksX * blocksY, records = bandCount * layerStride;
+    id<MTLBuffer> input = [k.device newBufferWithLength:8 + records * 16 + 16
+                                               options:MTLResourceStorageModeShared];
+    id<MTLBuffer> offsets = [k.device newBufferWithLength:(base + records) * 4
+                                                 options:MTLResourceStorageModeShared];
+    CHECK(input && input.contents && offsets && offsets.contents);
+    std::memset(input.contents, 0, input.length); // Sequence placeholder + trailing shader read guards.
+    std::memset(offsets.contents, 0xff, offsets.length); // Absent blocks remain UINT32_MAX.
+    auto *table = static_cast<uint32_t *>(offsets.contents);
+    auto *bytes = static_cast<uint8_t *>(input.contents);
+    for (unsigned b = 0; b < bandCount; ++b) {
+        for (unsigned block = 0; block < layerStride; ++block) {
+            if (sparseOnly || ((b + block) % 3 == 1 && block != layerStride - 1)) continue;
+            // The 16-byte record after makeFrame's 8-byte sequence header; not a GPU encoder fixture.
+            std::array<uint8_t, 16> record = {{1, 0, 4, 0x50, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0}};
+            record[4] = uint8_t(8 * (b + 1) + block); // Distinct band/block quantization.
+            record[8] = 1; record[9] = 0; // Ballot bit 0: first group has one bitplane.
+            record[10] = 0; record[11] = 3; // q_bits=0, scale=0; two nonzero coefficients.
+            record[12] = 1; // First coefficient negative, second positive; independent sign data.
+            const unsigned byteOffset = 8 + 16 * (records - 1 - (b * layerStride + block));
+            std::memcpy(bytes + byteOffset, record.data(), record.size());
+            table[base + b * layerStride + block] = byteOffset / 4; // Shader offsets are words.
+        }
+    }
+    auto *desc = [MTLTextureDescriptor new];
+    desc.textureType = MTLTextureType2DArray; desc.pixelFormat = MTLPixelFormatR32Float;
+    desc.width = width; desc.height = height; desc.arrayLength = 4;
+    desc.storageMode = MTLStorageModePrivate;
+    desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    id<MTLTexture> outputs[] = {[k.device newTextureWithDescriptor:desc],
+                              [k.device newTextureWithDescriptor:desc]};
+    CHECK(outputs[0] && outputs[1]);
+    const NSUInteger rowBytes = ((width * sizeof(float) + 255) / 256) * 256;
+    const NSUInteger imageBytes = rowBytes * height, textureBytes = 4 * imageBytes;
+    id<MTLBuffer> readback = [k.device newBufferWithLength:2 * textureBytes
+                                                  options:MTLResourceStorageModeShared];
+    CHECK(readback && readback.contents);
+    std::memset(readback.contents, 0x7f, readback.length); // Sentinel detects unwritten valid pixels.
+    id<MTLCommandBuffer> cmd = [q commandBuffer]; CHECK(cmd);
+    id<MTLBlitCommandEncoder> init = [cmd blitCommandEncoder]; CHECK(init);
+    for (unsigned mode = 0; mode < 2; ++mode)
+        for (unsigned layer = 0; layer < 4; ++layer)
+            [init copyFromBuffer:readback sourceOffset:0 sourceBytesPerRow:rowBytes
+             sourceBytesPerImage:imageBytes sourceSize:MTLSizeMake(width, height, 1)
+                       toTexture:outputs[mode] destinationSlice:layer destinationLevel:0
+              destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [init endEncoding];
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial];
+    CHECK(enc);
+    [enc setComputePipelineState:k.dequant];
+    [enc setBuffer:input offset:0 atIndex:0]; [enc setBuffer:offsets offset:0 atIndex:2];
+    for (unsigned mode = 0; mode < 2; ++mode) {
+        [enc setTexture:outputs[mode] atIndex:0];
+        const unsigned dispatches = mode == 0 ? bandCount : 1;
+        for (unsigned b = 0; b < dispatches; ++b) {
+            Push push = {{int32_t(width), int32_t(height)}, int32_t(firstBand + b),
+                int32_t(base + b * layerStride), int32_t(blocksX), int32_t(layerStride)};
+            [enc setBytes:&push length:sizeof(push) atIndex:1];
+            [enc dispatchThreadgroups:MTLSizeMake(blocksX, blocksY, mode == 0 ? 1 : bandCount)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
+    }
+    [enc endEncoding];
+    finishGPU(cmd);
+    // Read back only after compute completion, then wait for the blits before CPU inspection.
+    cmd = [q commandBuffer]; CHECK(cmd);
+    id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder]; CHECK(blit);
+    for (unsigned mode = 0; mode < 2; ++mode)
+        for (unsigned layer = 0; layer < 4; ++layer)
+            [blit copyFromTexture:outputs[mode] sourceSlice:layer sourceLevel:0
+                     sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1)
+                         toBuffer:readback destinationOffset:mode * textureBytes + layer * imageBytes
+           destinationBytesPerRow:rowBytes destinationBytesPerImage:imageBytes];
+    [blit endEncoding];
+    finishGPU(cmd);
+    const auto *result = static_cast<const uint8_t *>(readback.contents);
+    bool positive = false, negative = false;
+    for (unsigned layer = firstBand; layer < 4; ++layer) {
+        for (NSUInteger y = 0; y < height; ++y) {
+            const auto *row = result + layer * imageBytes + y * rowBytes;
+            CHECK(std::memcmp(row, row + textureBytes, width * sizeof(float)) == 0);
+            for (NSUInteger x = 0; x < width; ++x) {
+                uint32_t bits; float value;
+                std::memcpy(&bits, row + x * 4, 4); std::memcpy(&value, &bits, 4);
+                CHECK(bits != 0x7f7f7f7f);
+                const unsigned block = unsigned(y / 32) * blocksX + unsigned(x / 32);
+                if (table[base + (layer - firstBand) * layerStride + block] == UINT32_MAX)
+                    CHECK(value == 0.0f);
+                positive |= value > 0; negative |= value < 0;
+            }
+        }
+    }
+    CHECK(sparseOnly ? (!positive && !negative) : (positive && negative));
+}
+static void dequantBatchTests(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q)
+{
+    for (unsigned bands : {3u, 4u})
+        for (unsigned width : {4u, 65u})
+            for (bool sparse : {false, true}) {
+                @autoreleasepool { dequantBatchCase(k, q, width, width == 4 ? 4 : 33, bands, sparse); }
+            }
+    std::puts("Dequant per-band/batched byte equivalence passed; NOT encoder/IDWT differential goldens");
+}
 static void hardwareTests(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q)
 {
     invalid(k, nil, config(), constantClock, @"queue/device mismatch");
@@ -266,6 +386,7 @@ int main()
         if (!kernels) std::fprintf(stderr, "Kernel factory failed: %s\n", error.description.UTF8String);
         CHECK(kernels && error == nil); // Supported-device failures FAIL, never skip.
         id<MTLCommandQueue> queue = [device newCommandQueue]; CHECK(queue);
+        dequantBatchTests(kernels, queue);
         hardwareTests(kernels, queue);
         std::puts("Metal decoder synthetic submission/completion smoke passed; no pixel correctness claim");
         return 0;

@@ -117,7 +117,15 @@ private:
 }
 - (MLPyrowaveFrame *)tryTakeFrame
 {
-    if (!os_unfair_lock_trylock(&_lock)) return nil;
+    return [self tryTakeFrameWithContention:nullptr];
+}
+- (MLPyrowaveFrame *)tryTakeFrameWithContention:(BOOL *)contention
+{
+    if (contention) *contention = NO;
+    if (!os_unfair_lock_trylock(&_lock)) {
+        if (contention) *contention = YES;
+        return nil;
+    }
     ScopedLock lock(&_lock, false);
     if (_stopped) return nil;
     const uint64_t now = Sample(&_clock);

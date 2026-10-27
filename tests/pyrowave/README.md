@@ -153,12 +153,16 @@ clang++ -std=c++14 -Wall -Wextra -Werror -g -O1 -fsanitize=address,undefined
 Only even 2..16384 SDR709/8-bit/420 sessions are supported; wire range full/limited
 and siting center/left must match. Input is 8 bytes..16 MiB. Five-level aligned
 layout capacity is preflighted with checked uint64 arithmetic before allocation.
-Input+16 zero guards +4*capacity offsets +2*capacity temporary masks + fixed
-object/1024-byte bookkeeping allowance must fit 32 MiB (requests, not process RSS).
+Input+16 zero guards, offsets and session-cached masks (4/2 bytes per slot),
+object sizes/1024-byte bookkeeping must fit 32 MiB, using vector capacities
+(allocation requests, not process RSS).
 Offsets are BYTE offsets to unique record headers; UINT32_MAX is absent. Guard
-bytes are initialized, but shader read safety is not certified. The immutable
-result copies the full input and envelope ID/timestamp/timing/metadata; failures
-publish nothing. No clock comparison is performed; callers own expiry decisions.
+bytes are initialized, but shader read safety is not certified. Receiver recovery
+copies once into owned scratch; `ValidateOwned` validates then moves it without
+a second payload copy. The borrowed-input wrapper still copies after validation.
+Immutable results snapshot envelope ID/timestamp/timing/metadata; failures publish
+nothing. Masks are cached per session; payload sign counts use OR/popcount.
+No clock comparison is performed in the codec; callers own expiry decisions.
 
 Synthetic CHECK fixtures cover sparse/zero counts, ownership, both ranges/sitings,
 2/128/130 and CPU-only maximum dimensions, sequence/color/session conflicts,
@@ -276,8 +280,20 @@ Presentation blits all three correctly shaped R8Unorm planes to a shared buffer 
 This is synthetic dispatch/lifetime smoke, NOT pixel correctness, Metal validation,
 real encoder conformance, deterministic Busy coverage, streaming or feature readiness.
 
-IDWT caches pipeline bindings and sets shared push bytes once per level for an
-unmeasured CPU encoding-overhead reduction; this is not a GPU throughput claim.
+Dequant batches bands with grid.z=3/4 per component/level: 42 dispatches become 13;
+IDWT remains 13, caches pipeline bindings and sets shared push bytes once per level.
+Synthetic bytewise per-band/batched dequant comparisons cover sparse/nonzero inputs,
+3/4 bands and 4x4/65x33 geometry, not a full nonzero IDWT/real-encoder pixel oracle.
+
+`test_metal_kernels.mm` additionally checks same-device bundle identity, stale-error
+clearing and nil rejection after a hit without evicting the last good cache entry.
+The serialized factory retains only one most-recent successful immutable bundle
+by exact device object identity; callers keep older returned bundles alive.
+This removes repeated preflight/setup compilation, not measured steady-state work.
+All existing CI gates remain required; new Metal assertions are CI-only and pending.
+See [optimization v1](../../docs/pyrowave-metal-optimization.md) for profiling labels,
+baseline/acceptance gates and deferred work. No local benchmarking hardware or
+speedup evidence is available; local golden/Metal execution remains prohibited.
 
 ## Standalone SDR Metal renderer (not live enablement)
 `MLPyrowaveMetalRenderer` is an opt-in peer consuming public coordinator packets,

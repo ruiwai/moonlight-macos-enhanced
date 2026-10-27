@@ -5,9 +5,9 @@
 #include <utility>
 
 namespace MLPyrowave {
-Receiver::Receiver(const CodecSession &session, uint32_t maxPacketSize,
+Receiver::Receiver(std::unique_ptr<CodecValidator> &&validator, uint32_t maxPacketSize,
     uint64_t (*clock)(void *), void *clockContext)
-    : session_(session), maxPacketSize_(maxPacketSize), clock_(clock),
+    : validator_(std::move(validator)), maxPacketSize_(maxPacketSize), clock_(clock),
       clockContext_(clockContext), reassembly_(MLPyrowaveReassemblyCreate())
 {
 }
@@ -18,7 +18,10 @@ std::unique_ptr<Receiver> Receiver::Create(const CodecSession &session,
     if (!IsSupportedCodecSession(session) || clock == nullptr ||
         maxPacketSize <= 128 || maxPacketSize > 65536) return nullptr;
     try {
-        std::unique_ptr<Receiver> receiver(new Receiver(session, maxPacketSize, clock, clockContext));
+        auto validator = CodecValidator::Create(session);
+        if (!validator) return nullptr;
+        std::unique_ptr<Receiver> receiver(new Receiver(
+            std::move(validator), maxPacketSize, clock, clockContext));
         if (receiver->reassembly_ == nullptr) return nullptr;
         return receiver;
     } catch (const std::bad_alloc &) {
@@ -98,16 +101,17 @@ std::unique_ptr<const ReceivedFrame> Receiver::Receive(
         if (header.codecPayloadLength > 16u * 1024u * 1024u) {
             Discard(); return nullptr;
         }
-        std::vector<uint8_t> scratch(header.codecPayloadLength);
+        const size_t payloadLength = header.codecPayloadLength;
+        std::vector<uint8_t> scratch(payloadLength + 16);
         if (!Sample(now)) return nullptr;
         size_t length = 0;
         MLPyrowaveFrameInfo ownedInfo = {};
-        if (MLPyrowaveReassemblyCopyFrame(reassembly_, now, scratch.data(), scratch.size(),
+        if (MLPyrowaveReassemblyCopyFrame(reassembly_, now, scratch.data(), payloadLength,
                 &length, &ownedInfo) != LI_PYROWAVE_REASSEMBLY_COMPLETE) {
             Discard(); return nullptr;
         }
         // Copy retires the watermark before validation/allocation can fail.
-        auto codec = ValidateCodecFrame(scratch.data(), length, session_, ownedInfo);
+        auto codec = validator_->ValidateOwned(std::move(scratch), length, ownedInfo);
         if (!codec) { Discard(); return nullptr; }
         std::unique_ptr<const ReceivedFrame> result(new ReceivedFrame{
             std::move(codec), outerTimestamp_, presentation_});

@@ -33,6 +33,7 @@ static id<MTLComputePipelineState> Pipeline(id<MTLDevice> device, id<MTLLibrary>
 }
 
 @interface MLPyrowaveMetalKernels ()
++ (instancetype)uncachedKernelsWithDevice:(id<MTLDevice>)device error:(NSError **)error;
 - (instancetype)initWithDevice:(id<MTLDevice>)device
                         dequant:(id<MTLComputePipelineState>)dequant
                            idwt:(id<MTLComputePipelineState>)idwt
@@ -59,6 +60,19 @@ static id<MTLComputePipelineState> Pipeline(id<MTLDevice> device, id<MTLLibrary>
 }
 
 + (instancetype)kernelsWithDevice:(id<MTLDevice>)device error:(NSError **)error
+{
+    @synchronized ([MLPyrowaveMetalKernels class]) {
+        static __strong MLPyrowaveMetalKernels *cached = nil;
+        if (error) *error = nil;
+        if (!device) return Fail(error, MLPyrowaveMetalErrorUnsupportedDevice, @"No Metal device");
+        if (cached.device == device) return cached;
+        MLPyrowaveMetalKernels *kernels = [self uncachedKernelsWithDevice:device error:error];
+        if (kernels) cached = kernels; // Publish only a complete successful bundle.
+        return kernels;
+    }
+}
+
++ (instancetype)uncachedKernelsWithDevice:(id<MTLDevice>)device error:(NSError **)error
 {
     if (error) *error = nil;
     if (!device) return Fail(error, MLPyrowaveMetalErrorUnsupportedDevice, @"No Metal device");

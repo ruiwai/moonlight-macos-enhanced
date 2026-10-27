@@ -45,6 +45,9 @@ typedef uint64_t (*MLPyrowaveClock)(void * _Nullable context);
 // complete, validated frames (Common v2 IGNORED or VALIDATED_FRAME, not GPU).
 - (int)submitPacket:(nullable const LI_PYROWAVE_RECEIVED_PACKET *)packet;
 - (nullable MLPyrowaveFrame *)tryTakeFrame;
+// Contention is cleared on entry, true ONLY on failed coordinator trylock.
+// Caller must arrange a receive-completion wake (including IGNORED) to retry.
+- (nullable MLPyrowaveFrame *)tryTakeFrameWithContention:(BOOL * _Nullable)contention;
 // Idempotent permanent local stop; no synchronous Common stop or GPU waits.
 - (void)stop;
 @end

@@ -1,4 +1,5 @@
-// Exact generated FP32 decoder sources from AlkaidLab/pyrowave at
+// Generated FP32 decoder sources with minimal local dequant grid.z adaptation from
+// AlkaidLab/pyrowave at
 // cc91cbf6363721d19d135d05ca8e3d8665ea6afd:metal/shaders/pyrowave_msl.h.
 // License notices and provenance: docs/pyrowave-metal-provenance.md.
 // Compile separately: the two libraries contain colliding helper definitions.
@@ -465,6 +466,7 @@ struct Registers
     int output_layer;
     int block_offset_32x32;
     int block_stride_32x32;
+    int block_layer_stride;
 };
 
 struct PayloadOffsets
@@ -602,7 +604,7 @@ kernel void pyrowave_wavelet_dequant(const device void* spvBufferAliasSet0Bindin
     threadgroup uint shared_sign_offset;
     threadgroup spvUnsafeArray<uint, 16> shared_plane_byte_offsets;
     uint local_index = (gl_SubgroupID * gl_SubgroupSize) + gl_SubgroupInvocationID;
-    int block_index_32x32 = int((uint(registers.block_offset_32x32) + (gl_WorkGroupID.y * uint(registers.block_stride_32x32))) + gl_WorkGroupID.x);
+    int block_index_32x32 = int((uint(registers.block_offset_32x32) + (gl_WorkGroupID.y * uint(registers.block_stride_32x32))) + gl_WorkGroupID.x + gl_WorkGroupID.z * uint(registers.block_layer_stride));
     uint block_local_index = extract_bits(local_index, uint(0), uint(3));
     uint block_x = extract_bits(local_index, uint(3), uint(2));
     uint block_y = extract_bits(local_index, uint(5), uint(2));
@@ -619,7 +621,7 @@ kernel void pyrowave_wavelet_dequant(const device void* spvBufferAliasSet0Bindin
         {
             for (int i = 0; i < 4; i++)
             {
-                int3 _459 = int3(coord + int2(i, j), registers.output_layer);
+                int3 _459 = int3(coord + int2(i, j), registers.output_layer + int(gl_WorkGroupID.z));
                 uDequantImg.write(float4(0.0), uint2(_459.xy), uint(_459.z));
             }
         }
@@ -741,7 +743,7 @@ kernel void pyrowave_wavelet_dequant(const device void* spvBufferAliasSet0Bindin
     {
         for (int i_3 = 0; i_3 < 4; i_3++)
         {
-            int3 _841 = int3(coord + int2(i_3, j_3), registers.output_layer);
+            int3 _841 = int3(coord + int2(i_3, j_3), registers.output_layer + int(gl_WorkGroupID.z));
             uDequantImg.write(float4(v[j_3][i_3]), uint2(_841.xy), uint(_841.z));
         }
     }

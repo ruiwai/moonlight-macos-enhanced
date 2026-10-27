@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <utility>
 
 #define CHECK(condition) do { if (!(condition)) { \
     std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #condition); \
@@ -77,7 +78,81 @@ static Bytes frame(const CodecSession &s, const Bytes &r = record())
 static std::unique_ptr<const ValidatedCodecFrame> validate(const Bytes &b,
     const CodecSession &s = session(), const MLPyrowaveFrameInfo &info = envelope())
 {
-    return ValidateCodecFrame(b.data(), b.size(), s, info);
+    auto borrowed = ValidateCodecFrame(b.data(), b.size(), s, info);
+    auto validator = CodecValidator::Create(s);
+    if (!validator) { CHECK(!borrowed); return borrowed; }
+    Bytes bytes = b;
+    bytes.resize(b.size() + 16, 0xa5);
+    auto owned = validator->ValidateOwned(std::move(bytes), b.size(), info);
+    CHECK(bool(owned) == bool(borrowed)); // All existing malformed/duplicate fixtures too.
+    if (owned) {
+        CHECK(owned->bytes() == borrowed->bytes());
+        CHECK(owned->offsets() == borrowed->offsets());
+    }
+    return borrowed;
+}
+
+static void testOwnedTransferAndCache()
+{
+    auto s = session();
+    auto validator = CodecValidator::Create(s); CHECK(validator);
+    const Bytes good = frame(s);
+    Bytes bytes = good;
+    bytes.resize(good.size() + 16, 0xa5);
+    const auto *allocation = bytes.data();
+    auto info = envelope();
+    auto first = validator->ValidateOwned(std::move(bytes), good.size(), info);
+    CHECK(first && first->bytes().data() == allocation);
+    CHECK(first->payloadSize() == good.size() && first->bytes().size() == good.size() + 16);
+    CHECK(std::equal(good.begin(), good.end(), first->bytes().begin()));
+    CHECK(std::all_of(first->bytes().begin() + good.size(), first->bytes().end(),
+        [](uint8_t byte) { return byte == 0; }));
+    s.width = 0; // Cache owns its session snapshot, not the caller's storage.
+    const Bytes zero = sequence(session(), 0);
+    bytes = zero; bytes.resize(zero.size() + 16, 0xa5);
+    info.frameId += 8; info.metadata = {};
+    auto second = validator->ValidateOwned(std::move(bytes), zero.size(), info);
+    CHECK(second && second->frameInfo().frameId == info.frameId);
+    CHECK(!second->frameInfo().metadata.hasHostProcessingLatency);
+    CHECK(std::all_of(second->offsets().begin(), second->offsets().end(),
+        [](uint32_t offset) { return offset == UINT32_MAX; }));
+    bytes = good; bytes.push_back(0); // Reject after a valid record was scanned.
+    const size_t badLength = bytes.size(); bytes.resize(badLength + 16, 0xa5);
+    const Bytes unchanged = bytes;
+    CHECK(!validator->ValidateOwned(std::move(bytes), badLength, envelope()));
+    CHECK(bytes == unchanged);
+    validator.reset();
+    CHECK(first->bytes().data() == allocation && first->offsets()[0] == 8);
+    CHECK(first->session().width == 128 && first->frameInfo().frameId == envelope().frameId);
+    CHECK(first->frameInfo().metadata.hostProcessingLatency == 65535);
+    CHECK(std::equal(good.begin(), good.end(), first->bytes().begin()));
+    CHECK(second->payloadSize() == zero.size());
+}
+
+static void testOwnedBounds()
+{
+    CHECK(!CodecValidator::Create(CodecSession{}));
+    auto validator = CodecValidator::Create(session()); CHECK(validator);
+    const Bytes good = frame(session());
+    for (size_t length : {size_t(0), size_t(7), size_t(16u * 1024 * 1024 + 1),
+                          std::numeric_limits<size_t>::max()}) {
+        Bytes bytes = good; bytes.resize(good.size() + 16, 0xa5);
+        const Bytes unchanged = bytes;
+        CHECK(!validator->ValidateOwned(std::move(bytes), length, envelope()));
+        CHECK(bytes == unchanged);
+    }
+    for (size_t padding : {size_t(0), size_t(15), size_t(17)}) {
+        Bytes bytes = good; bytes.resize(good.size() + padding, 0xa5);
+        CHECK(!validator->ValidateOwned(std::move(bytes), good.size(), envelope()));
+    }
+    Bytes oversized = good; oversized.resize(good.size() + 16, 0xa5);
+    oversized.reserve(32u * 1024 * 1024); // Size fits; capacity plus tables does not.
+    const auto *allocation = oversized.data();
+    const Bytes unchanged = oversized;
+    CHECK(!validator->ValidateOwned(std::move(oversized), good.size(), envelope()));
+    CHECK(oversized.data() == allocation && oversized == unchanged);
+    Bytes bytes = good; bytes.resize(good.size() + 16, 0xa5);
+    CHECK(validator->ValidateOwned(std::move(bytes), good.size(), envelope()));
 }
 
 static void testValidAndOwnership()
@@ -266,6 +341,8 @@ static void testPooledSignsAndPlanes()
 
 int main()
 {
+    testOwnedTransferAndCache();
+    testOwnedBounds();
     testValidAndOwnership();
     testSequenceAndIdentity();
     testSessionAndBounds();

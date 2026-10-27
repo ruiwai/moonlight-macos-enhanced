@@ -43,6 +43,15 @@ int main()
         CHECK(kernels.idwt.staticThreadgroupMemoryLength <= device.maxThreadgroupMemoryLength);
         CHECK(kernels.idwtFinal.staticThreadgroupMemoryLength <= device.maxThreadgroupMemoryLength);
         CHECK(kernels.sampler != nil && kernels.sampler.device == device);
+        error = [NSError errorWithDomain:@"previous" code:99 userInfo:nil];
+        CHECK([MLPyrowaveMetalKernels kernelsWithDevice:device error:&error] == kernels);
+        CHECK(error == nil); // Cache hits clear stale errors too.
+        CHECK([MLPyrowaveMetalKernels kernelsWithDevice:nil error:&error] == nil);
+        CHECK([error.domain isEqualToString:MLPyrowaveMetalErrorDomain]);
+        CHECK(error.code == MLPyrowaveMetalErrorUnsupportedDevice);
+        CHECK([MLPyrowaveMetalKernels kernelsWithDevice:nil error:nil] == nil);
+        CHECK([MLPyrowaveMetalKernels kernelsWithDevice:device error:&error] == kernels);
+        CHECK(error == nil); // Nil failures did not evict the last good bundle.
         std::puts("Metal pipeline creation checks passed (no decode dispatch/pixel validation)");
         return 0;
     }

@@ -180,8 +180,9 @@ public:
         const NSUInteger bottom = std::floor(std::min(double(texture.height), viewport.originY + h));
         if (right <= left || bottom <= top) return MLPyrowaveMetalSubmitDropped;
         const MTLScissorRect scissor = {left, top, right - left, bottom - top};
-        MLPyrowaveFrame *frame = [_coordinator tryTakeFrame];
-        if (!frame) return MLPyrowaveMetalSubmitDropped;
+        BOOL contention = NO;
+        MLPyrowaveFrame *frame = [_coordinator tryTakeFrameWithContention:&contention];
+        if (!frame) return contention ? MLPyrowaveMetalSubmitReceiveBusy : MLPyrowaveMetalSubmitDropped;
         // Synchronous borrow captures resources/drawable only, never renderer/UI owners.
         id<MTLRenderPipelineState> pipeline = _pipeline;
         id<MTLSamplerState> sampler = _sampler;

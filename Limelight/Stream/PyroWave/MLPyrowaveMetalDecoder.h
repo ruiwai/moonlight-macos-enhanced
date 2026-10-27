@@ -14,6 +14,8 @@ typedef NS_ENUM(NSInteger, MLPyrowaveMetalSubmitResult) {
     MLPyrowaveMetalSubmitDropped,
     MLPyrowaveMetalSubmitStopped,
     MLPyrowaveMetalSubmitFailed,
+    // Renderer-only coordinator contention; caller must arrange receive wakeup.
+    MLPyrowaveMetalSubmitReceiveBusy,
 };
 // Synchronous, nonthrowing borrow ONLY. Encode all final readers here, on this
 // command buffer; may presentDrawable, MUST NOT commit/enqueue/retain the buffer

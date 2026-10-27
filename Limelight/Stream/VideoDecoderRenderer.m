@@ -22,6 +22,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <dlfcn.h>
+#include <os/signpost.h>
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdocumentation"
 #include <libavcodec/avcodec.h>
@@ -49,6 +50,15 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
                               int write_seq_header);
 
 typedef struct MLDecodeFrameContext MLDecodeFrameContext;
+
+static os_log_t MLPyrowavePipelineLog(void) {
+    static os_log_t log;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        log = os_log_create("com.moonlight.pyrowave", "pipeline");
+    });
+    return log;
+}
 
 static uint64_t MLPyrowaveNowUs(void *context) {
     (void)context;
@@ -1510,6 +1520,7 @@ static BOOL MLGetSharedMetalPipelines(MTLPixelFormat pixelFormat,
     int _pyrowavePreflightFrameRate;
     id<MTLCommandQueue> _pyrowavePreflightQueue;
     uint64_t _pyrowaveEpoch;
+    uint64_t _pyrowaveReceiveSerial; // Guarded by _decodeSubmitLock, including IGNORED receives.
     MLPyrowaveStats _pyrowaveStats; // Access only under @synchronized(self).
     NSUInteger _lastLoggedDrawableWidth;
     NSUInteger _lastLoggedDrawableHeight;
@@ -3256,10 +3267,26 @@ static CGDirectDisplayID getDisplayID(NSScreen* screen)
 - (int)submitPyrowavePacket:(const LI_PYROWAVE_RECEIVED_PACKET *)packet
 {
     [_decodeSubmitLock lock];
-    int result = LI_PYROWAVE_PACKET_IGNORED;
-    if (!_decoderStopped && _pyrowaveMode && _pyrowavePeer) {
-        uint64_t now = LiGetMillis();
-        result = [_pyrowavePeer submitPacket:packet];
+    MLPyrowaveMetalRenderer *peer = !_decoderStopped && _pyrowaveMode ? _pyrowavePeer : nil;
+    uint64_t epoch = _pyrowaveEpoch;
+    [_decodeSubmitLock unlock];
+    if (!peer) return LI_PYROWAVE_PACKET_IGNORED;
+    uint64_t now = LiGetMillis();
+    os_log_t log = MLPyrowavePipelineLog();
+    BOOL trace = os_signpost_enabled(log);
+    os_signpost_id_t receive = trace ? os_signpost_id_generate(log) : OS_SIGNPOST_ID_INVALID;
+    if (trace) os_signpost_interval_begin(log, receive, "Receive",
+        "frameId=%u epoch=%llu size=%zu", packet ? packet->frameId : 0,
+        (unsigned long long)epoch, packet ? packet->length : 0);
+    // Strong peer survives stop; coordinator serializes receive/stop. No async borrow.
+    int result = [peer submitPacket:packet];
+    [_decodeSubmitLock lock];
+    BOOL wake = NO;
+    if (_decoderStopped || !_pyrowaveMode || _pyrowavePeer != peer || _pyrowaveEpoch != epoch) {
+        result = LI_PYROWAVE_PACKET_IGNORED;
+    } else {
+        _pyrowaveReceiveSerial++;
+        wake = MLPyrowaveDrawGateReceiveComplete(&_pyrowaveDrawGate);
         if (packet && packet->data) { @synchronized (self) {
             BOOL validated = result == LI_PYROWAVE_PACKET_VALIDATED_FRAME;
             if (validated && _firstDecodeInputMs == 0) _firstDecodeInputMs = now;
@@ -3267,11 +3294,12 @@ static CGDirectDisplayID getDisplayID(NSScreen* screen)
                                   at:now bytes:packet->length decodeMs:0];
         } }
     }
-    if (result == LI_PYROWAVE_PACKET_VALIDATED_FRAME) {
-        _pyrowaveDrawGate.pending = true;
+    if (result == LI_PYROWAVE_PACKET_VALIDATED_FRAME || wake) {
+        if (result == LI_PYROWAVE_PACKET_VALIDATED_FRAME) _pyrowaveDrawGate.pending = true;
         [self requestPyrowaveDrawLocked];
     }
     [_decodeSubmitLock unlock];
+    if (trace) os_signpost_interval_end(log, receive, "Receive", "result=%d", result);
     return result;
 }
 
@@ -5318,7 +5346,8 @@ void decompressionOutputCallback(void *decompressionOutputRefCon, void *sourceFr
     uint64_t epoch = _pyrowaveEpoch;
     MLPyrowaveMetalRenderer *peer = _pyrowavePeer;
     BOOL stopped = _decoderStopped;
-    BOOL drawPending = _pyrowaveDrawGate.pending && !_pyrowaveDrawGate.inFlight;
+    BOOL drawPending = _pyrowaveDrawGate.pending && !_pyrowaveDrawGate.inFlight &&
+        !_pyrowaveDrawGate.waitingForReceive;
     [_decodeSubmitLock unlock];
     if (pyrowave) {
         if (!drawPending || ![NSThread isMainThread] || stopped || !peer || !view ||
@@ -5334,25 +5363,36 @@ void decompressionOutputCallback(void *decompressionOutputRefCon, void *sourceFr
         if (!CGSizeEqualToSize(view.drawableSize, size)) view.drawableSize = size;
         [_decodeSubmitLock unlock];
         // Drawable acquisition can block. Never hold the receive/stop lock here.
+        os_log_t log = MLPyrowavePipelineLog();
+        BOOL trace = os_signpost_enabled(log);
+        os_signpost_id_t acquisition = trace ? os_signpost_id_generate(log) : OS_SIGNPOST_ID_INVALID;
+        if (trace) os_signpost_interval_begin(log, acquisition, "Drawable", "epoch=%llu",
+            (unsigned long long)epoch);
         id<CAMetalDrawable> drawable = view.currentDrawable;
+        if (trace) os_signpost_interval_end(log, acquisition, "Drawable", "valid=%d", drawable != nil);
         if (!drawable) return; // Backend pending frame remains owned there.
         [_decodeSubmitLock lock];
+        uint64_t receiveSerial = _pyrowaveReceiveSerial;
         if (_decoderStopped || !_pyrowaveMode || _pyrowaveEpoch != epoch ||
             _pyrowavePeer != peer || _metalView != view || self.presentationSuspended ||
             !MLPyrowaveDrawGateBeginSubmission(&_pyrowaveDrawGate)) {
             [_decodeSubmitLock unlock];
             return;
         }
+        // Main is the sole encoding owner. Never hold app lock across backend work.
+        [_decodeSubmitLock unlock];
         __weak VideoDecoderRenderer *weakSelf = self;
+        __weak MLPyrowaveMetalRenderer *weakPeer = peer;
         [drawable addPresentedHandler:^(id<MTLDrawable> presented) {
             double time = presented.presentedTime;
             uint64_t presentedMs = LiGetMillis();
             void (^record)(void) = ^{
                 VideoDecoderRenderer *renderer = weakSelf;
-                if (!renderer) return;
+                MLPyrowaveMetalRenderer *presentedPeer = weakPeer;
+                if (!renderer || !presentedPeer) return;
                 [renderer->_decodeSubmitLock lock];
                 if (!renderer->_decoderStopped && renderer->_pyrowaveMode &&
-                    renderer->_pyrowaveEpoch == epoch && time > 0)
+                    renderer->_pyrowaveEpoch == epoch && renderer->_pyrowavePeer == presentedPeer && time > 0)
                     [renderer recordRenderedFrameSampleAtTimeMs:presentedMs
                         enqueueTimeMs:0 presentationTimeSeconds:time];
                 [renderer->_decodeSubmitLock unlock];
@@ -5363,37 +5403,40 @@ void decompressionOutputCallback(void *decompressionOutputRefCon, void *sourceFr
         // Backend is sole commit owner. GPU completion is NOT display ack.
         uint64_t submitMs = LiGetMillis();
         MLPyrowaveMetalSubmitResult result = [peer renderPendingToDrawable:drawable completion:^(BOOL success) {
-            uint64_t completedMs = LiGetMillis(); // Capture before main-queue delay.
-            VideoDecoderRenderer *owner = weakSelf;
-            if (success && owner) {
-                [owner->_decodeSubmitLock lock];
-                if (!owner->_decoderStopped && owner->_pyrowaveMode && owner->_pyrowaveEpoch == epoch) {
-                    @synchronized (owner) {
-                        [owner recordPyrowaveEvent:MLPyrowaveStatsDecoded at:completedMs bytes:0
+            uint64_t completedMs = LiGetMillis();
+            VideoDecoderRenderer *renderer = weakSelf;
+            MLPyrowaveMetalRenderer *completedPeer = weakPeer;
+            if (!renderer || !completedPeer) return;
+            [renderer->_decodeSubmitLock lock];
+            if (!renderer->_decoderStopped && renderer->_pyrowaveMode &&
+                renderer->_pyrowaveEpoch == epoch && renderer->_pyrowavePeer == completedPeer) {
+                MLPyrowaveDrawGateComplete(&renderer->_pyrowaveDrawGate);
+                if (success) {
+                    @synchronized (renderer) {
+                        [renderer recordPyrowaveEvent:MLPyrowaveStatsDecoded at:completedMs bytes:0
                                          decodeMs:MLPyrowaveStatsDuration(submitMs, completedMs)];
                     }
+                    [renderer requestPyrowaveDrawLocked]; // Marshals UI draw to main.
+                } else {
+                    Log(LOG_E, @"PyroWave GPU completion failed: %@", completedPeer.lastError);
+                    [completedPeer stop];
+                    MLPyrowaveDrawGateReset(&renderer->_pyrowaveDrawGate);
                 }
-                [owner->_decodeSubmitLock unlock];
             }
-            dispatch_async(dispatch_get_main_queue(), ^{
-                VideoDecoderRenderer *renderer = weakSelf;
-                if (!renderer) return;
-                [renderer->_decodeSubmitLock lock];
-                if (renderer->_pyrowaveEpoch == epoch && renderer->_pyrowaveMode &&
-                    !renderer->_decoderStopped) {
-                    MLPyrowaveDrawGateComplete(&renderer->_pyrowaveDrawGate);
-                    if (success) [renderer requestPyrowaveDrawLocked];
-                    else {
-                        Log(LOG_E, @"PyroWave GPU completion failed: %@", renderer->_pyrowavePeer.lastError);
-                        [renderer->_pyrowavePeer stop];
-                        MLPyrowaveDrawGateReset(&renderer->_pyrowaveDrawGate);
-                    }
-                }
-                [renderer->_decodeSubmitLock unlock];
-            });
+            [renderer->_decodeSubmitLock unlock];
         }];
-        MLPyrowaveDrawGateEndSubmission(&_pyrowaveDrawGate,
-            result == MLPyrowaveMetalSubmitSubmitted, result == MLPyrowaveMetalSubmitBusy);
+        [_decodeSubmitLock lock];
+        // Reset belongs to a new epoch: stale EndSubmission/completion must not touch it.
+        if (_decoderStopped || !_pyrowaveMode || _pyrowaveEpoch != epoch ||
+            _pyrowavePeer != peer || _metalView != view) {
+            [_decodeSubmitLock unlock];
+            return;
+        }
+        if (result == MLPyrowaveMetalSubmitReceiveBusy)
+            MLPyrowaveDrawGateWaitForReceive(&_pyrowaveDrawGate, _pyrowaveReceiveSerial != receiveSerial);
+        else
+            MLPyrowaveDrawGateEndSubmission(&_pyrowaveDrawGate,
+                result == MLPyrowaveMetalSubmitSubmitted, result == MLPyrowaveMetalSubmitBusy);
         if (result == MLPyrowaveMetalSubmitFailed || result == MLPyrowaveMetalSubmitStopped) {
             Log(LOG_E, @"PyroWave submission stopped (%ld): %@", (long)result, peer.lastError);
             [peer stop];
@@ -6105,6 +6148,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     [_decodeSubmitLock lock];
     _decoderStopped = YES;
     _pyrowavePreflightReady = NO; _pyrowavePreflightQueue = nil;
+    // App -> renderer -> coordinator/decoder. Receive releases coordinator before
+    // reacquiring app; GPU callbacks release decoder first; no reverse lock edge.
     [_pyrowavePeer stop];
     _pyrowavePeer = nil;
     _pyrowaveEpoch++;

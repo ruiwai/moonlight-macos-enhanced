@@ -53,12 +53,16 @@ uint16_t read16(const uint8_t *p)
 
 unsigned popcount(uint32_t bits)
 {
+#if defined(__clang__) || defined(__GNUC__)
+    return unsigned(__builtin_popcountll(bits));
+#else
     unsigned count = 0;
     while (bits != 0) {
         bits &= bits - 1;
         ++count;
     }
     return count;
+#endif
 }
 
 bool add(uint64_t a, uint64_t b, uint64_t &out)
@@ -91,7 +95,18 @@ uint64_t aligned(uint32_t dimension)
     return std::max<uint64_t>(128, (uint64_t(dimension) + 31) & ~uint64_t(31));
 }
 
-bool layoutBudget(const CodecSession &s, size_t length, uint64_t &capacity)
+bool storageBudget(uint64_t maskCapacity, uint64_t offsetCapacity, size_t bytes)
+{
+    uint64_t masks, offsets, total;
+    // Include cached masks, frame/validator objects and allocation bookkeeping.
+    const uint64_t overhead = sizeof(ValidatedCodecFrame) + sizeof(CodecValidator) + 1024;
+    return multiply(maskCapacity, 2, masks) && multiply(offsetCapacity, 4, offsets) &&
+        add(uint64_t(bytes), masks, total) && add(total, offsets, total) &&
+        add(total, overhead, total) && total <= StorageLimit &&
+        total <= std::numeric_limits<size_t>::max();
+}
+
+bool layoutBudget(const CodecSession &s, uint64_t &capacity)
 {
     capacity = 0;
     for (int level = 4; level >= 0; --level) {
@@ -103,15 +118,7 @@ bool layoutBudget(const CodecSession &s, size_t length, uint64_t &capacity)
             !multiply(blocks, bands, increment) || !add(capacity, increment, capacity))
             return false;
     }
-    uint64_t tables, total;
-    // Exactly sized vectors: offsets4 + temporary legal masks2 per slot.
-    // Fixed allowance covers local objects plus allocation bookkeeping, not RSS.
-    const uint64_t overhead = sizeof(ValidatedCodecFrame) +
-        sizeof(std::vector<uint16_t>) + 1024;
-    return capacity <= UINT32_MAX && multiply(capacity, 6, tables) &&
-        add(uint64_t(length), 16, total) && add(total, tables, total) &&
-        add(total, overhead, total) && total <= StorageLimit &&
-        total <= std::numeric_limits<size_t>::max();
+    return capacity <= UINT32_MAX && storageBudget(capacity, capacity, 16);
 }
 
 void appendBandMasks(uint64_t w, uint64_t h, std::vector<uint16_t> &masks,
@@ -228,24 +235,69 @@ ValidatedCodecFrame::ValidatedCodecFrame(std::vector<uint8_t> &&bytes,
 {
 }
 
+CodecValidator::CodecValidator(const CodecSession &session, std::vector<uint16_t> &&masks)
+    : session_(session), masks_(std::move(masks))
+{
+}
+
+std::unique_ptr<CodecValidator> CodecValidator::Create(const CodecSession &session) noexcept
+{
+    try {
+        uint64_t capacity;
+        if (!IsSupportedCodecSession(session) || !layoutBudget(session, capacity))
+            return nullptr;
+        std::vector<uint16_t> masks(static_cast<size_t>(capacity), 0);
+        if (!storageBudget(masks.capacity(), capacity, 16)) return nullptr;
+        fillMasks(session, masks);
+        return std::unique_ptr<CodecValidator>(new CodecValidator(session, std::move(masks)));
+    } catch (const std::bad_alloc &) {
+        return nullptr;
+    } catch (const std::length_error &) {
+        return nullptr;
+    }
+}
+
+bool CodecValidator::Validate(const uint8_t *input, size_t length, size_t storageBytes,
+    const MLPyrowaveFrameInfo &info, std::vector<uint32_t> &offsets) const
+{
+    if (input == nullptr || length < 8 || length > InputLimit || info.frameId == 0 ||
+        info.deadlineUs < info.firstReceiveUs ||
+        !storageBudget(masks_.capacity(), masks_.size(), storageBytes) ||
+        !sequenceMatches(input, session_) || (read32(input + 4) & 0xffffff) > masks_.size())
+        return false;
+    offsets.assign(masks_.size(), UINT32_MAX);
+    return storageBudget(masks_.capacity(), offsets.capacity(), storageBytes) &&
+        scanRecords(input, length, masks_, offsets);
+}
+
+std::unique_ptr<const ValidatedCodecFrame> CodecValidator::ValidateOwned(
+    std::vector<uint8_t> &&bytes, size_t payloadLength, const MLPyrowaveFrameInfo &info) const
+{
+    try {
+        if (payloadLength < 8 || payloadLength > InputLimit ||
+            bytes.size() != payloadLength + 16) return nullptr;
+        std::vector<uint32_t> offsets;
+        if (!Validate(bytes.data(), payloadLength, bytes.capacity(), info, offsets)) return nullptr;
+        std::fill(bytes.begin() + payloadLength, bytes.end(), uint8_t(0));
+        return std::unique_ptr<const ValidatedCodecFrame>(new ValidatedCodecFrame(
+            std::move(bytes), std::move(offsets), session_, info));
+    } catch (const std::bad_alloc &) {
+        return nullptr;
+    } catch (const std::length_error &) {
+        return nullptr;
+    }
+}
+
 std::unique_ptr<const ValidatedCodecFrame> ValidateCodecFrame(
     const uint8_t *input, size_t length, const CodecSession &session,
     const MLPyrowaveFrameInfo &info)
 {
     try {
-        if (input == nullptr || length < 8 || length > InputLimit ||
-            !IsSupportedCodecSession(session) || info.frameId == 0 ||
-            info.deadlineUs < info.firstReceiveUs)
+        if (input == nullptr || length < 8 || length > InputLimit) return nullptr;
+        auto validator = CodecValidator::Create(session);
+        std::vector<uint32_t> offsets;
+        if (!validator || !validator->Validate(input, length, length + 16, info, offsets))
             return nullptr;
-        if (!sequenceMatches(input, session)) return nullptr;
-        uint64_t capacity;
-        if (!layoutBudget(session, length, capacity) ||
-            (read32(input + 4) & 0xffffff) > capacity)
-            return nullptr;
-        std::vector<uint16_t> masks(static_cast<size_t>(capacity), 0);
-        std::vector<uint32_t> offsets(static_cast<size_t>(capacity), UINT32_MAX);
-        fillMasks(session, masks);
-        if (!scanRecords(input, length, masks, offsets)) return nullptr;
         // Only a completely validated transaction earns an owned input copy.
         std::vector<uint8_t> bytes(length + 16, 0);
         std::memcpy(bytes.data(), input, length);

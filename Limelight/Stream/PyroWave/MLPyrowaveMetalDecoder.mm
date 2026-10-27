@@ -5,11 +5,18 @@
 #include "MLPyrowavePresentationBudget.h"
 #include "MLPyrowaveReceiver.hpp"
 #include <os/lock.h>
+#include <os/signpost.h>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 
 namespace {
+os_log_t PipelineLog()
+{
+    static os_log_t log = os_log_create("com.moonlight.pyrowave", "pipeline");
+    return log;
+}
 constexpr uint64_t MiB = 1024 * 1024, Payload = 16 * MiB + 16;
 constexpr MTLTextureUsage ReadWrite = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
 constexpr MTLResourceOptions Shared = MTLResourceStorageModeShared | MTLResourceHazardTrackingModeTracked;
@@ -19,7 +26,7 @@ struct Layout {
     uint64_t cpuReserve = 0, offsetBytes = 0;
 };
 struct DequantPush {
-    int32_t resolution[2], outputLayer, blockOffset, blockStride, pad;
+    int32_t resolution[2], outputLayer, blockOffset, blockStride, blockLayerStride;
 };
 struct IdwtPush { int32_t resolution[2]; float inv[2]; };
 static_assert(sizeof(DequantPush) == 24, "Dequant ABI");
@@ -278,13 +285,13 @@ bool EncodeDequant(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
         for (unsigned c = 0; c < 3; ++c) {
             if (l == 0 && c != 0) continue;
             [enc setTexture:p->layers[c][l] atIndex:0];
-            for (unsigned b = l == 4 ? 0 : 1; b < 4; ++b) {
-                DequantPush push = {{int32_t(p->layout.width[l]), int32_t(p->layout.height[l])},
-                    int32_t(b), int32_t(p->layout.offset[c][l][b]), int32_t(p->layout.stride[c][l][b]), 0};
-                [enc setBytes:&push length:sizeof(push) atIndex:1];
-                [enc dispatchThreadgroups:MTLSizeMake((push.resolution[0] + 31) / 32,
-                    (push.resolution[1] + 31) / 32, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-            }
+            const unsigned b = l == 4 ? 0 : 1;
+            const int32_t blocksX = (p->layout.width[l] + 31) / 32, blocksY = (p->layout.height[l] + 31) / 32;
+            DequantPush push = {{int32_t(p->layout.width[l]), int32_t(p->layout.height[l])},
+                int32_t(b), int32_t(p->layout.offset[c][l][b]), int32_t(p->layout.stride[c][l][b]), blocksX * blocksY};
+            [enc setBytes:&push length:sizeof(push) atIndex:1];
+            [enc dispatchThreadgroups:MTLSizeMake(blocksX, blocksY, 4 - b)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         }
     } // All bands dispatched: UINT32_MAX offsets explicitly write sparse zeros.
     [enc endEncoding];
@@ -395,13 +402,26 @@ bool EncodeIDWT(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
             p->busy = false; p->stopped = true;
             return MLPyrowaveMetalSubmitFailed;
         }
+        os_log_t log = PipelineLog();
+        const bool trace = os_signpost_enabled(log);
+        const uint32_t frameId = f.frameInfo().frameId;
+        const uint64_t generation = frame.generation;
+        const os_signpost_id_t upload = trace ? os_signpost_id_generate(log) : OS_SIGNPOST_ID_INVALID;
+        if (trace) os_signpost_interval_begin(log, upload, "Upload", "frameId=%u generation=%llu",
+            frameId, (unsigned long long)generation);
         std::memcpy(p->payload.contents, f.bytes().data(), f.bytes().size());
         cmd.label = @"PyroWave decode and present";
         std::memset(static_cast<uint8_t *>(p->payload.contents) + f.payloadSize(), 0, 16);
         auto *words = static_cast<uint32_t *>(p->offsets.contents);
         for (size_t i = 0; i < f.offsets().size(); ++i)
             words[i] = f.offsets()[i] == UINT32_MAX ? UINT32_MAX : f.offsets()[i] / 4;
-        if (!EncodeDequant(p, cmd) || !EncodeIDWT(p, cmd)) {
+        if (trace) os_signpost_interval_end(log, upload, "Upload");
+        const os_signpost_id_t encode = trace ? os_signpost_id_generate(log) : OS_SIGNPOST_ID_INVALID;
+        if (trace) os_signpost_interval_begin(log, encode, "Encode", "frameId=%u generation=%llu",
+            frameId, (unsigned long long)generation);
+        const bool encoded = EncodeDequant(p, cmd) && EncodeIDWT(p, cmd);
+        if (trace) os_signpost_interval_end(log, encode, "Encode", "success=%d", encoded);
+        if (!encoded) {
             p->busy = false; p->stopped = true;
             return MLPyrowaveMetalSubmitFailed;
         }
@@ -409,10 +429,21 @@ bool EncodeIDWT(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
             p->busy = false;
             return MLPyrowaveMetalSubmitDropped; // Uncommitted; no readers can escape borrow.
         }
-        // Handler captures ONLY private retirement state and the supplied callback.
+        // Only private retirement state, supplied callback, scalar trace IDs/log; no CPU frame.
         MLPyrowaveMetalCompletion callback = [completion copy];
         [cmd addCompletedHandler:^(id<MTLCommandBuffer> completed) {
             const BOOL success = completed.status == MTLCommandBufferStatusCompleted;
+            if (os_signpost_enabled(log)) {
+                const double start = completed.GPUStartTime, end = completed.GPUEndTime;
+                if (std::isfinite(start) && std::isfinite(end) && start > 0 && end >= start)
+                    os_signpost_event_emit(log, OS_SIGNPOST_ID_EXCLUSIVE, "GPUComplete",
+                        "frameId=%u generation=%llu success=%d gpuSeconds=%f",
+                        frameId, (unsigned long long)generation, success, end - start);
+                else
+                    os_signpost_event_emit(log, OS_SIGNPOST_ID_EXCLUSIVE, "GPUComplete",
+                        "frameId=%u generation=%llu success=%d",
+                        frameId, (unsigned long long)generation, success);
+            }
             os_unfair_lock_lock(&p->lock);
             p->busy = false;
             if (!success) {
@@ -427,6 +458,8 @@ bool EncodeIDWT(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
             p->busy = false;
             return p->stopped ? MLPyrowaveMetalSubmitStopped : MLPyrowaveMetalSubmitDropped;
         }
+        if (os_signpost_enabled(log)) os_signpost_event_emit(log, OS_SIGNPOST_ID_EXCLUSIVE,
+            "Submitted", "frameId=%u generation=%llu", frameId, (unsigned long long)generation);
         [cmd commit]; // Sole commit owner; all GPU readers are in this buffer.
         return MLPyrowaveMetalSubmitSubmitted;
     }

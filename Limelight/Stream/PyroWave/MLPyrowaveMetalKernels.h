@@ -15,6 +15,11 @@ typedef NS_ERROR_ENUM(MLPyrowaveMetalErrorDomain, MLPyrowaveMetalError) {
 // Pipeline capability bundle ONLY, for the supplied actual renderer device.
 // Not format/dimensions/budget/GPU correctness or final feature preflight.
 // Does not create a default device, allocate decode resources or dispatch work.
+// Serializes creation and caches one process-lifetime most-recent successful
+// immutable bundle, keyed by exact device object identity (not registryID).
+// Same-device hits return the same bundle; failures preserve the last success.
+// Nil devices always reject; error is cleared on entry, including cache hits.
+// Eviction does not invalidate bundles retained by callers.
 @interface MLPyrowaveMetalKernels : NSObject
 @property(nonatomic, readonly, strong) id<MTLDevice> device;
 @property(nonatomic, readonly, strong) id<MTLComputePipelineState> dequant;

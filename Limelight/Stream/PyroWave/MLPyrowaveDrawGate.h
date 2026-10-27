@@ -7,12 +7,12 @@
 // Zero-initialized; caller serializes every access and owns stop/epoch checks.
 // Notification/admission state only: never owns a frame, UI object or callback.
 typedef struct {
-    bool pending, queued, inFlight, attempted;
+    bool pending, queued, inFlight, attempted, waitingForReceive;
 } MLPyrowaveDrawGate;
 
 static inline bool MLPyrowaveDrawGateRequest(MLPyrowaveDrawGate *g)
 {
-    if (!g->pending || g->queued || g->inFlight) return false;
+    if (!g->pending || g->queued || g->inFlight || g->waitingForReceive) return false;
     g->queued = true;
     g->attempted = false;
     return true;
@@ -20,7 +20,7 @@ static inline bool MLPyrowaveDrawGateRequest(MLPyrowaveDrawGate *g)
 
 static inline bool MLPyrowaveDrawGateBeginSubmission(MLPyrowaveDrawGate *g)
 {
-    if (!g->pending || g->inFlight) return false;
+    if (!g->pending || g->inFlight || g->waitingForReceive) return false;
     g->pending = false;
     g->inFlight = true;
     g->attempted = true;
@@ -44,6 +44,25 @@ static inline void MLPyrowaveDrawGateComplete(MLPyrowaveDrawGate *g)
     g->inFlight = false;
 }
 
+// Caller must arrange ReceiveComplete after synchronous receive, even if IGNORED.
+// The caller's locked serial comparison closes the completion-before-wait race.
+static inline void MLPyrowaveDrawGateWaitForReceive(MLPyrowaveDrawGate *g,
+                                                  bool receiveCompletedSinceBegin)
+{
+    g->inFlight = false;
+    g->pending = true;
+    g->waitingForReceive = !receiveCompletedSinceBegin;
+    g->attempted = receiveCompletedSinceBegin;
+}
+
+static inline bool MLPyrowaveDrawGateReceiveComplete(MLPyrowaveDrawGate *g)
+{
+    const bool wake = g->waitingForReceive;
+    g->waitingForReceive = false;
+    if (wake) g->attempted = true;
+    return wake;
+}
+
 static inline bool MLPyrowaveDrawGateFinishNotification(MLPyrowaveDrawGate *g)
 {
     g->queued = false;
@@ -54,7 +73,7 @@ static inline bool MLPyrowaveDrawGateFinishNotification(MLPyrowaveDrawGate *g)
 
 static inline void MLPyrowaveDrawGateReset(MLPyrowaveDrawGate *g)
 {
-    const MLPyrowaveDrawGate zero = {false, false, false, false};
+    const MLPyrowaveDrawGate zero = {false, false, false, false, false};
     *g = zero;
 }
 #endif

@@ -174,6 +174,47 @@ static void testGenerations()
     CHECK(witness == nil); // Drain + weak nil, not just clearing x's strong reference.
     validate(old, Id, 11);
 }
+// Deterministic trylock contention only; runs in macOS CPU CI, never locally.
+struct BlockingClock {
+    dispatch_semaphore_t entered = dispatch_semaphore_create(0);
+    dispatch_semaphore_t release = dispatch_semaphore_create(0);
+    bool block = false;
+};
+static uint64_t blockingTick(void *p)
+{
+    auto &c = *static_cast<BlockingClock *>(p);
+    if (c.block) {
+        c.block = false;
+        dispatch_semaphore_signal(c.entered);
+        CHECK(dispatch_semaphore_wait(c.release, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0);
+    }
+    return 100;
+}
+static void testContention()
+{
+    BlockingClock c;
+    auto *r = [[MLPyrowaveCoordinator alloc] initWithConfiguration:config()
+                                                           clock:blockingTick context:&c];
+    CHECK(r); CHECK(deliver(r, build()) == LI_PYROWAVE_PACKET_VALIDATED_FRAME);
+    c.block = true; auto *context = &c; auto done = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @autoreleasepool {
+            LI_PYROWAVE_RECEIVED_PACKET invalid = {};
+            CHECK([r submitPacket:&invalid] == LI_PYROWAVE_PACKET_IGNORED);
+            dispatch_semaphore_signal(done);
+        }
+    });
+    CHECK(dispatch_semaphore_wait(context->entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0);
+    BOOL contention = NO;
+    CHECK(![r tryTakeFrameWithContention:&contention] && contention);
+    dispatch_semaphore_signal(c.release);
+    CHECK(dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0);
+    validate([r tryTakeFrameWithContention:&contention], Id, 1); CHECK(!contention);
+    contention = YES; CHECK(![r tryTakeFrameWithContention:&contention] && !contention);
+    CHECK(![r tryTakeFrameWithContention:nullptr]); // Optional out parameter, ordinary empty.
+    [r stop]; contention = YES;
+    CHECK(![r tryTakeFrameWithContention:&contention] && !contention);
+}
 static void testConcurrency()
 {
     auto *r = [[MLPyrowaveCoordinator alloc] initWithConfiguration:config(33)
@@ -211,7 +252,7 @@ static void testConcurrency()
 int main()
 {
     @autoreleasepool {
-        testFactory(); testOwnershipAndSlot(); testTiming(); testGenerations(); testConcurrency();
+        testFactory(); testOwnershipAndSlot(); testTiming(); testGenerations(); testContention(); testConcurrency();
     }
     std::puts("coordinator CPU checks passed"); return 0;
 }

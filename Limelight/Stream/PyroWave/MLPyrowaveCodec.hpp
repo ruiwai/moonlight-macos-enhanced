@@ -27,6 +27,30 @@ std::unique_ptr<const ValidatedCodecFrame> ValidateCodecFrame(
     const uint8_t *input, size_t length, const CodecSession &session,
     const MLPyrowaveFrameInfo &info);
 
+// Session-scoped immutable layout cache; no frame/input storage is retained.
+class CodecValidator final {
+public:
+    static std::unique_ptr<CodecValidator> Create(const CodecSession &) noexcept;
+    // Exact size payloadLength+16, payload 8 bytes..16 MiB. Capacity (not just
+    // size), cached masks and offsets must fit the 32 MiB storage budget.
+    // Full validation precedes transfer; success preserves data() and zeros guards.
+    // Failure returns null without moving bytes or publishing any frame.
+    std::unique_ptr<const ValidatedCodecFrame> ValidateOwned(
+        std::vector<uint8_t> &&bytes, size_t payloadLength,
+        const MLPyrowaveFrameInfo &info) const;
+    CodecValidator(const CodecValidator &) = delete;
+    CodecValidator &operator=(const CodecValidator &) = delete;
+
+private:
+    friend std::unique_ptr<const ValidatedCodecFrame> ValidateCodecFrame(
+        const uint8_t *, size_t, const CodecSession &, const MLPyrowaveFrameInfo &);
+    CodecValidator(const CodecSession &, std::vector<uint16_t> &&);
+    bool Validate(const uint8_t *, size_t, size_t, const MLPyrowaveFrameInfo &,
+                  std::vector<uint32_t> &) const;
+    const CodecSession session_;
+    const std::vector<uint16_t> masks_;
+};
+
 // Immutable CPU transaction, not a Metal ABI or a guarantee of GPU validity.
 class ValidatedCodecFrame final {
 public:
@@ -38,6 +62,7 @@ public:
     size_t payloadSize() const { return bytes_.size() - 16; }
 
 private:
+    friend class CodecValidator;
     friend std::unique_ptr<const ValidatedCodecFrame> ValidateCodecFrame(
         const uint8_t *, size_t, const CodecSession &, const MLPyrowaveFrameInfo &);
     ValidatedCodecFrame(std::vector<uint8_t> &&bytes, std::vector<uint32_t> &&offsets,

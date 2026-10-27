@@ -17,7 +17,7 @@ struct ReceivedFrame final {
 // share receiveTimeUs's monotonic microsecond epoch (app: LiGetMicroseconds).
 // Stop permanently disables admission. Caller owns every returned frame;
 // future coordinator must bound waiting ownership and GPU leases separately.
-// Reassembly's budget already includes this receiver's one <=16 MiB scratch.
+// Reassembly budgets payload scratch; codec budgets its 16 guards and cached masks.
 // This receiver does NOT certify an aggregate GPU/session allocation budget.
 class Receiver final {
 public:
@@ -30,10 +30,10 @@ public:
     Receiver &operator=(const Receiver &) = delete;
 
 private:
-    Receiver(const CodecSession &, uint32_t, uint64_t (*)(void *), void *);
+    Receiver(std::unique_ptr<CodecValidator> &&, uint32_t, uint64_t (*)(void *), void *);
     void Discard() noexcept;
     bool Sample(uint64_t &now) noexcept;
-    const CodecSession session_;
+    const std::unique_ptr<CodecValidator> validator_;
     const uint32_t maxPacketSize_;
     uint64_t (*const clock_)(void *);
     void *const clockContext_;
