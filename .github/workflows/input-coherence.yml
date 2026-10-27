@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   input-coherence:
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 15
     defaults:
       run:

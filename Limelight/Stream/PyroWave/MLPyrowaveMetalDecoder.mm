@@ -144,6 +144,7 @@ public:
     uint64_t gpuBytes;
     os_unfair_lock lock;
     bool stopped, busy, sampled, regressed;
+    NSError *lastError;
     MLPyrowaveClock clock;
     void *context;
     uint64_t lastClock;
@@ -263,6 +264,7 @@ bool EncodeDequant(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
 {
     id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial];
     if (!enc) return false;
+    enc.label = @"PyroWave dequant";
     [enc setComputePipelineState:p->kernels.dequant];
     [enc setBuffer:p->payload offset:0 atIndex:0];
     [enc setBuffer:p->offsets offset:0 atIndex:2];
@@ -286,6 +288,7 @@ bool EncodeIDWT(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
 {
     id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial];
     if (!enc) return false;
+    enc.label = @"PyroWave IDWT";
     [enc setSamplerState:p->kernels.sampler atIndex:0];
     for (int l = 4; l >= 0; --l) {
         if (l != 4) [enc memoryBarrierWithScope:MTLBarrierScopeTextures];
@@ -320,6 +323,13 @@ bool EncodeIDWT(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
     return self;
 }
 - (uint64_t)sessionAllocationBytes { return _pool->gpuBytes + _pool->layout.cpuReserve; }
+- (NSError *)lastError
+{
+    os_unfair_lock_lock(&_pool->lock);
+    NSError *snapshot = _pool->lastError;
+    os_unfair_lock_unlock(&_pool->lock);
+    return snapshot;
+}
 + (instancetype)decoderWithKernels:(MLPyrowaveMetalKernels *)kernels
                        commandQueue:(id<MTLCommandQueue>)commandQueue
                       configuration:(MLPyrowaveConfiguration)configuration
@@ -374,6 +384,7 @@ bool EncodeIDWT(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
             return MLPyrowaveMetalSubmitFailed;
         }
         std::memcpy(p->payload.contents, f.bytes().data(), f.bytes().size());
+        cmd.label = @"PyroWave decode and present";
         std::memset(static_cast<uint8_t *>(p->payload.contents) + f.payloadSize(), 0, 16);
         auto *words = static_cast<uint32_t *>(p->offsets.contents);
         for (size_t i = 0; i < f.offsets().size(); ++i)
@@ -392,7 +403,11 @@ bool EncodeIDWT(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
             const BOOL success = completed.status == MTLCommandBufferStatusCompleted;
             os_unfair_lock_lock(&p->lock);
             p->busy = false;
-            if (!success) p->stopped = true;
+            if (!success) {
+                p->lastError = completed.error ?: [NSError errorWithDomain:MLPyrowaveMetalErrorDomain
+                    code:completed.status userInfo:@{NSLocalizedDescriptionKey: @"PyroWave GPU command failed without a Metal error"}];
+                p->stopped = true;
+            }
             os_unfair_lock_unlock(&p->lock);
             if (callback) callback(success);
         }];

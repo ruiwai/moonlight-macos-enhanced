@@ -193,11 +193,13 @@ static void hardwareTests(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q)
         };
         CHECK([decoder submitFrame:frame presentation:decline completion:noCompletion] == MLPyrowaveMetalSubmitDropped);
         CHECK(presentations == 1);
+        CHECK(decoder.lastError == nil);
         for (unsigned i = 0; i < 2; ++i) { // Re-submit only AFTER actual completion, no assumed Busy timing.
             auto state = std::make_shared<CompletionState>();
             CHECK([decoder submitFrame:frame presentation:present completion:callback(state)] == MLPyrowaveMetalSubmitSubmitted);
             CHECK(dispatch_semaphore_wait(state->semaphore, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) == 0);
             CHECK(state->calls.load() == 1 && state->success.load());
+            CHECK(decoder.lastError == nil);
         }
         CHECK(presentations == 3);
         now = 100100; // Exact expiry drops without presenting or completing.

@@ -1,8 +1,16 @@
 # PyroWave prerequisites (CI only)
 
+## App draw gate (standalone CPU unit checks)
+`test_draw_gate.c` exercises the production pure-C notification/admission helper:
+coalescing, pending while GPU-busy, completion wakeup, no nil-drawable/Busy spin,
+Dropped rescheduling and reset. The app still owns locking and stop/epoch guards.
+CI runs C11 and C++14 with strict warnings and fatal ASan/UBSan before GPU steps,
+without a hardware skip. These gate-only tests may also be run locally.
+They do not prove AppKit callbacks, GPU correctness, performance or flicker fixes.
+
 The [workflow](../../.github/workflows/pyrowave-prerequisites.yml) compiles and
 runs the existing Common protocol/reassembly goldens and standalone native
-metadata validation and strict reassembly adapter tests on `macos-15`.
+metadata validation and strict reassembly adapter tests on `macos-latest`.
 It runs on pushes to `pyrowave/**`, pull requests targeting `master` or `main`,
 and manual dispatch. Only the native Common gitlink and its pinned `enet` nested
 dependency are initialized; no application build or other nested dependency is needed.

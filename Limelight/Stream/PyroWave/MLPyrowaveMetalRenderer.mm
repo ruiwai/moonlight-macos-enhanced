@@ -72,6 +72,7 @@ public:
 @end
 
 @implementation MLPyrowaveMetalRenderer
+- (NSError *)lastError { return _decoder.lastError; }
 - (instancetype)initWithCoordinator:(MLPyrowaveCoordinator *)coordinator
     decoder:(MLPyrowaveMetalDecoder *)decoder queue:(id<MTLCommandQueue>)queue
     pipeline:(id<MTLRenderPipelineState>)pipeline sampler:(id<MTLSamplerState>)sampler

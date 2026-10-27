@@ -12,7 +12,7 @@ on:
 jobs:
   build_arch:
     name: Build arm64
-    runs-on: macos-15
+    runs-on: macos-latest
     env:
       # The EdDSA public key is safe to publish. Keep a repository fallback so
       # a missing optional secret cannot silently disable Sparkle in release

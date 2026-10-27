@@ -14,6 +14,7 @@ NS_ASSUME_NONNULL_BEGIN
 // outlive this instance (same monotonic microsecond epoch as packet receipt).
 @interface MLPyrowaveMetalRenderer : NSObject
 @property(nonatomic, readonly) MLPyrowaveConfiguration configuration;
+@property(nonatomic, readonly, nullable) NSError *lastError;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 // Uses ONLY the supplied existing renderer queue/device, with exact identity.

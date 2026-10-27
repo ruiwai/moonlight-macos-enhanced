@@ -36,6 +36,7 @@ typedef void (^MLPyrowaveMetalCompletion)(BOOL success);
 @property(nonatomic, readonly) MLPyrowaveConfiguration configuration;
 // Fixed heaps plus conservative CPU reservation; excludes caller resources.
 @property(nonatomic, readonly) uint64_t sessionAllocationBytes;
+@property(nonatomic, readonly, nullable) NSError *lastError;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 // Uses supplied actual renderer device/queue only. Clock/context are borrowed,

@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   common-golden-tests:
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 10
     defaults:
       run:
@@ -161,6 +161,20 @@ jobs:
             "${objects[@]}" -L "$build" -lmoonlight-common-c -Wl,-rpath,"$build" \
             -framework Foundation -o "$RUNNER_TEMP/pyrowave-common-coordinator-tests"
           "$RUNNER_TEMP/pyrowave-common-coordinator-tests"
+
+      - name: Compile and run standalone CPU draw gate (no GPU skip)
+        env:
+          ASAN_OPTIONS: halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          flags=(-Wall -Wextra -Werror -g -O1 '-fsanitize=address,undefined'
+                 -fno-sanitize-recover=all -fno-omit-frame-pointer)
+          xcrun clang -std=c11 "${flags[@]}" -I Limelight/Stream/PyroWave \
+            tests/pyrowave/test_draw_gate.c -o "$RUNNER_TEMP/pyrowave-draw-gate-c"
+          xcrun clang++ -x c++ -std=c++14 "${flags[@]}" -I Limelight/Stream/PyroWave \
+            tests/pyrowave/test_draw_gate.c -o "$RUNNER_TEMP/pyrowave-draw-gate-cpp"
+          "$RUNNER_TEMP/pyrowave-draw-gate-c"
+          "$RUNNER_TEMP/pyrowave-draw-gate-cpp"
 
       - name: Compile and probe Metal pipelines (not decode pixels)
         env:
