@@ -89,6 +89,17 @@ struct Fixture {
 };
 static void testPresentationConfiguration()
 {
+    CHECK(MLPyrowaveOfferedFormats(3, YES, -1) == int(VIDEO_FORMAT_H264 | VIDEO_FORMAT_PYROWAVE));
+    CHECK(MLPyrowaveOfferedFormats(3, NO, -1) == VIDEO_FORMAT_H264);
+    for (int legacy : {0, VIDEO_FORMAT_H264, int(VIDEO_FORMAT_PYROWAVE), INT_MIN, INT_MAX}) {
+        CHECK(MLPyrowaveOfferedFormats(3, NO, legacy) == VIDEO_FORMAT_H264);
+        CHECK(MLPyrowaveOfferedFormats(3, YES, legacy) == int(VIDEO_FORMAT_H264 | VIDEO_FORMAT_PYROWAVE));
+    } // Explicit experimental policy never leaks arbitrary legacy formats.
+    for (int preference : {-1, 0, 1, 2, 4, INT_MAX})
+        for (int legacy : {0, VIDEO_FORMAT_H264, int(VIDEO_FORMAT_PYROWAVE), -1, INT_MIN}) {
+            CHECK(MLPyrowaveOfferedFormats(preference, NO, legacy) == legacy);
+            CHECK(MLPyrowaveOfferedFormats(preference, YES, legacy) == legacy);
+        } // CPU mask policy only, no GPU truth from this helper.
     const MLPyrowaveConfiguration valid = {128, 128, 256, 0, 0, 1};
     CHECK(MLPyrowaveValidatePresentationConfiguration(valid, 60));
     auto bad = valid; bad.generation = 0;

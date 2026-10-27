@@ -94,8 +94,14 @@ typedef struct {
 - (BOOL)copyClientSdrWhite:(MLClientSdrWhite *)sdrWhite;
 
 - (void)prewarmPresentationForStreamConfig:(StreamConfiguration *)streamConfig;
+// Main thread, fresh instance only. Validates actual device/queue/pipelines and
+// fixed allocation + TWO drawable budget, not GPU correctness. Temporary peer
+// is destroyed before return; no submissions, targets, prewarm or UI mutation.
+- (BOOL)preflightPyrowaveWithConfiguration:(MLPyrowaveConfiguration)configuration
+                                frameRate:(int)frameRate error:(NSError **)error;
 // Main thread only, fresh instance only; no PyroWave reconfiguration yet.
 // Actual renderer queue/device, SDR BT.709 8-bit 420; failure never aliases VT.
+// Requires matching preflight config/FPS; negotiated packet maximum may shrink.
 - (BOOL)setupPyrowaveWithConfiguration:(MLPyrowaveConfiguration)configuration
                             frameRate:(int)frameRate
                                 error:(NSError **)error;

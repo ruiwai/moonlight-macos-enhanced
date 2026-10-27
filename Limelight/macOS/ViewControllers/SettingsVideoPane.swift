@@ -22,6 +22,8 @@ struct VideoView: View {
 
   private var videoCodecWarningKey: String? {
     switch settingsModel.selectedVideoCodec {
+    case "PyroWave (Experimental)":
+      return "Video codec warning PyroWave experimental"
     case "AV1":
       return SettingsModel.av1HardwareDecodeSupported ? nil : "Video codec warning AV1 software"
     case "H.265":
@@ -51,7 +53,7 @@ struct VideoView: View {
           .controllerPicker(selection: $settingsModel.selectedVideoCodec, options: SettingsModel.videoCodecs, title: { codec in languageManager.localize(codec) })
           .frame(width: 190, alignment: .trailing)
         }
-        // The chosen codec has no hardware decoder in this Mac: say what happens instead.
+        // Explain experimental overrides or an unavailable hardware decoder.
         if let warning = videoCodecWarningKey {
           HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill")

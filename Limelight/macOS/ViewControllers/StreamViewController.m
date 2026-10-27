@@ -1481,7 +1481,8 @@ highFreqMotor:(unsigned short)highFreqMotor {
     modeHeight &= ~1;
 
     NSInteger codecPreference = [SettingsClass videoCodecFor:self.app.host.uuid];
-    streamConfig.videoCodecPreference = (int)MAX(0, MIN(codecPreference, 2));
+    // Only the explicit stored value 3 opts in; unknown values keep legacy clamping.
+    streamConfig.videoCodecPreference = codecPreference == 3 ? 3 : (int)MAX(0, MIN(codecPreference, 2));
 
     BOOL hevcDecodeSupported = NO;
     if (@available(iOS 11.3, tvOS 11.3, macOS 10.14, *)) {
@@ -1489,7 +1490,7 @@ highFreqMotor:(unsigned short)highFreqMotor {
     }
     BOOL av1DecodeSupported = VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1);
 
-    streamConfig.allowHevc = streamConfig.videoCodecPreference != 0;
+    streamConfig.allowHevc = streamConfig.videoCodecPreference == 1 || streamConfig.videoCodecPreference == 2;
     if (streamConfig.videoCodecPreference == 2) {
         streamConfig.enableHdr = streamSettings.enableHdr && av1DecodeSupported;
     } else if (streamConfig.videoCodecPreference == 1) {
@@ -1499,7 +1500,7 @@ highFreqMotor:(unsigned short)highFreqMotor {
     }
     streamConfig.enable10BitSdr = [SettingsClass enable10BitSdrFor:self.app.host.uuid] &&
                                   !streamConfig.enableHdr &&
-                                  streamConfig.videoCodecPreference != 0 &&
+                                  (streamConfig.videoCodecPreference == 1 || streamConfig.videoCodecPreference == 2) &&
                                   (streamConfig.videoCodecPreference == 2 ? av1DecodeSupported : hevcDecodeSupported);
 
     if (streamConfig.enableHdr) {
@@ -1517,6 +1518,9 @@ highFreqMotor:(unsigned short)highFreqMotor {
     }
     BOOL dolbyVisionUsable = streamConfig.enableHdr &&
         MLAppleDolbyVisionDirectSurfaceAvailable(streamConfig.hdrTargetDisplayID);
+    if (streamConfig.videoCodecPreference == 3) {
+        enableYuv444 = NO; // Effective session override only; keep the saved preference.
+    }
     if (streamConfig.videoCodecPreference == 2 && !av1DecodeSupported) {
         // AV1 in software is 4:2:0 only; the setting is shown as off there.
         enableYuv444 = NO;
@@ -1648,12 +1652,19 @@ highFreqMotor:(unsigned short)highFreqMotor {
         codecName = @"AV1";
     } else if (streamConfig.videoCodecPreference == 1) {
         codecName = @"H.265";
+    } else if (streamConfig.videoCodecPreference == 3) {
+        codecName = @"PyroWave";
     }
     // The assessment only feeds the diagnostics overlay and the log, so it does not have to
     // delay the host request. It reads the bitrate as configured here: the stream manager
     // may lower streamConfig.bitRate from its bandwidth probe once it is running.
     const int riskBitrateKbps = streamConfig.bitRate;
     void (^assessStreamRisk)(void) = ^{
+        if (streamConfig.videoCodecPreference == 3) {
+            self.currentStreamRiskAssessment = nil;
+            Log(LOG_I, @"[diag] PyroWave experimental: skipping legacy codec risk assessment; GPU correctness and performance unverified");
+            return;
+        }
         self.currentStreamRiskAssessment = [StreamRiskAssessor assessWithHost:self.app.host
                                                                 targetAddress:streamConfig.host
                                                              connectionMethod:selectedConnectionMethod

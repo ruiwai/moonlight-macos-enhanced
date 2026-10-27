@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #import "MLPyrowaveMetalRenderer.h"
+#include "MLPyrowavePresentationBudget.h"
 #include "MLPyrowaveCodec.hpp"
 #include <os/lock.h>
 #include <algorithm>
@@ -130,6 +131,20 @@ public:
     if (!renderer) return Fail(error, @"Renderer object allocation failed");
     return renderer; // No partially constructed renderer escapes, no GPU waits.
 }
+- (BOOL)canPresentWidth:(NSUInteger)width height:(NSUInteger)height
+{
+    if (!width || !height || width > 16384 || height > 16384) return NO;
+    MTLTextureDescriptor *d = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+        width:width height:height mipmapped:NO];
+    if (!d) return NO;
+    d.storageMode = MTLStorageModePrivate;
+    d.usage = MTLTextureUsageRenderTarget;
+    const MTLSizeAndAlign sa = [_queue.device heapTextureSizeAndAlignWithDescriptor:d];
+    if (!sa.size || !sa.align || sa.align - 1 > UINT64_MAX - sa.size) return NO;
+    return MLPyrowavePresentationFitsBudget(_decoder.sessionAllocationBytes,
+        uint64_t(sa.size) + (sa.align - 1), 2);
+}
 - (int)submitPacket:(const LI_PYROWAVE_RECEIVED_PACKET *)packet
 {
     return [_coordinator submitPacket:packet]; // Never acquires renderer/decoder lock.
@@ -152,6 +167,8 @@ public:
         Unlock unlock(&_lock);
         if (_stopped) return MLPyrowaveMetalSubmitStopped;
         if (!ValidTarget(texture, _queue.device)) return MLPyrowaveMetalSubmitDropped;
+        if (!MLPyrowavePresentationFitsBudget(_decoder.sessionAllocationBytes,
+            texture.allocatedSize, 2)) return MLPyrowaveMetalSubmitDropped;
         const auto c = _configuration;
         const double scale = std::min(double(texture.width) / c.width, double(texture.height) / c.height);
         const double w = c.width * scale, h = c.height * scale;

@@ -23,6 +23,10 @@ NS_ASSUME_NONNULL_BEGIN
                                            clock:(nullable MLPyrowaveClock)clock
                                          context:(nullable void *)context
                                            error:(NSError * _Nullable * _Nullable)error;
+// Estimates TWO private BGRA8 render-target drawables plus decoder charge.
+// No allocation/submission; excludes caller's other resources/driver caches,
+// not process RSS. Runtime also checks two actual allocatedSize charges.
+- (BOOL)canPresentWidth:(NSUInteger)width height:(NSUInteger)height;
 // Synchronous borrowed public Common descriptor; returns Common CPU ack ONLY,
 // not GPU/presentation success. Independent coordinator thread-safety.
 - (int)submitPacket:(nullable const LI_PYROWAVE_RECEIVED_PACKET *)packet;
@@ -36,8 +40,8 @@ NS_ASSUME_NONNULL_BEGIN
                                           completion:(nullable MLPyrowaveMetalCompletion)completion;
 // Same pass without presentDrawable. Caller owns target and MUST NOT reuse/read
 // until completion; normal command-buffer references retain GPU resources.
-// Caller must account external targets within the existing 256 MiB session
-// budget; decoder accounting alone does not cover them or opaque driver caches.
+// Two target allocations are charged within the shared 256 MiB session budget;
+// caller must separately account any other external resources/driver caches.
 - (MLPyrowaveMetalSubmitResult)renderPendingToTexture:(nullable id<MTLTexture>)texture
                                          completion:(nullable MLPyrowaveMetalCompletion)completion;
 - (void)stop;

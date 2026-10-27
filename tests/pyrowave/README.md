@@ -16,7 +16,10 @@ dependency are initialized; no application build or other nested dependency is n
 At these pins, the protocol/reassembly helper sources are identical, but the
 public API and streaming integration are incompatible. Helper equality is not
 API/ABI compatibility: do not replace the native pin with Foundation Common.
-The app now has conditional receive-to-present wiring; PyroWave remains unoffered/disabled.
+The app has explicit `PyroWave (Experimental)` selection, offered only after actual-renderer preflight; default H.264 and indices 0..2 are unchanged.
+See [Foundation testing](../../docs/pyrowave-foundation-testing.md): vanilla repository-local host `441b2b88051a00c91d562b24ac703adefc4cf87f`, not the older home-directory fork.
+Policy assertions call the production offered-format helper; false preflight always returns H.264 for index 3, and legacy indices preserve their input masks.
+These CPU policy checks do not prove GPU availability/correctness or host interoperability. Current native build/tests await Actions; unsupported-hardware exit 77 is a skip, not a pass.
 
 ## Common raw bridge /v2 (not app enablement)
 
@@ -74,7 +77,7 @@ application/GPU integration or enablement; reassembly does not call this validat
 
 ## Strict reassembly /v1 boundary and requirement map
 
-Both modules remain standalone/disabled, outside Xcode/live streaming. The opaque
+Both modules now participate in conditional app wiring; standalone tests remain synthetic. The opaque
 heap adapter reuses Native Common at the pin above, not Foundation's
 streaming API; it never edits wire structs or accepts transport fragments.
 Callers serialize calls and supply monotonic microseconds; zero is a valid start.
@@ -225,8 +228,8 @@ Historical `5303fde`: attempt 1 had no runner; attempt 2 callback passed, negoti
 Tests link actual Common helpers/serializer with synthetic inputs, not network RTSP.
 The two production units have explicit Common Xcode membership; Apple-only tests
 are not app sources; no PBX change is needed for this repin. Historical `a8a647d`
-CI was all green with `65f43ca`; parent baseline `6e97b2f` subsequently passed all three workflows (PyroWave, Input 12/12 CTests, macOS app build/draft), compiling both Common units once (`/tmp/pyrowave-6e97b2f-404017*-reviewed.log`). At `f1c45a8`, app run 40481438739 passed with the current Common pin. The app still cannot opt in: no actual callback or active
-coordinator, actual-device preflight, Metal decoding or presentation integration.
+CI was all green with `65f43ca`; parent baseline `6e97b2f` subsequently passed all three workflows (PyroWave, Input 12/12 CTests, macOS app build/draft), compiling both Common units once (`/tmp/pyrowave-6e97b2f-404017*-reviewed.log`). At `f1c45a8`, app run 40481438739 passed with the current Common pin. Current callback/coordinator, preflight, Metal presentation and experimental selection are implemented;
+those historical runs do not validate this snapshot or prove live interoperability.
 
 ## Actual Common → coordinator → watchdog CPU gate (execution pending)
 
@@ -259,7 +262,7 @@ real encoder conformance, deterministic Busy coverage, streaming or feature read
 ## Standalone SDR Metal renderer (not live enablement)
 `MLPyrowaveMetalRenderer` is an opt-in peer consuming public coordinator packets,
 on the supplied existing renderer queue/device only; conditional Connection/
-VideoDecoderRenderer wiring now exists, but settings/selection remain absent. Fixed session, permanent stop, one pending + one
+VideoDecoderRenderer wiring and explicit preflight-gated selection now exist. Fixed session, permanent stop, one pending + one
 render-local owner; decoder Busy drops the consumed frame without retaining a retry.
 Nil/invalid targets preserve pending. BGRA8Unorm only, aspect-fit full-target black clear.
 Non-memoryless storage (stored result required). Fractional viewport; texture-bounded
@@ -278,4 +281,4 @@ configs, checks invalid-target pending preservation, bounded completion and stop
 Test-only same-queue blit checks gray within two codes of R8=128 and black letterbox;
 foreign-device checks need a second device. Uniform frames do NOT verify siting,
 nonzero coefficients, encoder pixel correctness or Metal validation.
-UI/drawable and Busy timing untested; offscreen shares pass. Still disabled.
+UI/drawable and Busy timing untested; offscreen shares pass. Explicit opt-in is experimental, not proven GPU correctness or interoperability.

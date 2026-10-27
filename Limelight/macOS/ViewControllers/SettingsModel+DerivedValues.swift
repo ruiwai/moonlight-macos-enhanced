@@ -438,7 +438,7 @@ extension SettingsModel {
     return customBitrate ?? Int(steps[index] * 1000)
   }
 
-  static var videoCodecs: [String] = ["H.264", "H.265", "AV1"]
+  static var videoCodecs: [String] = ["H.264", "H.265", "AV1", "PyroWave (Experimental)"]
   static var pacingOptions: [String] = ["Lowest Latency", "Smoothest Video"]
   static var audioConfigurations: [String] = [
     "Stereo",
@@ -1122,11 +1122,12 @@ extension SettingsModel {
     let dolbyVisionItem = videoCapabilityMatrix.items.first { $0.id == "display.dolbyVision81" }
     let dolbyVisionUsable = (dolbyVisionItem?.availability ?? .unavailable) != .unavailable
     return StreamChromaDecision.resolve(
-      hdrEnabled: hdr,
+      hdrEnabled: hdr && selectedVideoCodec != "PyroWave (Experimental)",
       videoCodecPreference: Self.getInt(from: selectedVideoCodec, in: Self.videoCodecs),
       dynamicHdrPreference: Self.dynamicHdrPreferenceRawValue(for: selectedDynamicHdrPreference),
       // AV1 in software is 4:2:0 only, whatever the stored setting says.
-      requestedYUV444: enableYUV444 && !(selectedVideoCodec == "AV1" && !Self.av1HardwareDecodeSupported),
+      requestedYUV444: enableYUV444 && selectedVideoCodec != "PyroWave (Experimental)"
+        && !(selectedVideoCodec == "AV1" && !Self.av1HardwareDecodeSupported),
       dolbyVisionUsable: dolbyVisionUsable)
   }
 

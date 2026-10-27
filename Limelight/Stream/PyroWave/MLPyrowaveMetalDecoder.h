@@ -34,6 +34,8 @@ typedef void (^MLPyrowaveMetalCompletion)(BOOL success);
 // a global overlap guarantee. Encoding/submission is NOT GPU correctness proof.
 @interface MLPyrowaveMetalDecoder : NSObject
 @property(nonatomic, readonly) MLPyrowaveConfiguration configuration;
+// Fixed heaps plus conservative CPU reservation; excludes caller resources.
+@property(nonatomic, readonly) uint64_t sessionAllocationBytes;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 // Uses supplied actual renderer device/queue only. Clock/context are borrowed,

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Actual-source synthetic zero-coefficient smoke, NOT full encoder correctness.
 #import "MLPyrowaveMetalRenderer.h"
+#include "MLPyrowavePresentationBudget.h"
 #include <dispatch/dispatch.h>
 #include <algorithm>
 #include <array>
@@ -28,6 +29,16 @@ static void invalid(MLPyrowaveConfiguration c, MLPyrowaveClock clock, NSString *
 }
 static void cpuFactoryTests()
 {
+    const uint64_t cap = MLPyrowaveSessionAllocationCap;
+    CHECK(!MLPyrowavePresentationFitsBudget(0, 1, 2));
+    CHECK(!MLPyrowavePresentationFitsBudget(1, 0, 2));
+    CHECK(!MLPyrowavePresentationFitsBudget(1, 1, 0));
+    CHECK(MLPyrowavePresentationFitsBudget(cap - 2, 1, 2));
+    CHECK(!MLPyrowavePresentationFitsBudget(cap - 1, 1, 2));
+    CHECK(!MLPyrowavePresentationFitsBudget(cap + 1, 1, 2));
+    CHECK(!MLPyrowavePresentationFitsBudget(UINT64_MAX, 1, 2));
+    CHECK(!MLPyrowavePresentationFitsBudget(1, UINT64_MAX, 2));
+    CHECK(!MLPyrowavePresentationFitsBudget(1, 2, UINT64_MAX));
     invalid(config(), nullptr, @"requires clock");
     for (unsigned fault = 0; fault < 11; ++fault) {
         auto c = config();
@@ -154,11 +165,22 @@ static void hardwareTests(id<MTLCommandQueue> queue, MLPyrowaveConfiguration c)
         clock:clockNow context:nullptr error:&error];
     if (!renderer) std::fprintf(stderr, "Renderer factory failed: %s\n", error.description.UTF8String);
     CHECK(renderer && error == nil);
+    CHECK([renderer canPresentWidth:256 height:128]);
+    CHECK(![renderer canPresentWidth:0 height:128]);
+    CHECK(![renderer canPresentWidth:128 height:0]);
+    CHECK(![renderer canPresentWidth:16385 height:128]);
+    CHECK(![renderer canPresentWidth:128 height:16385]);
+    CHECK(![renderer canPresentWidth:NSUIntegerMax height:128]);
+    CHECK(![renderer canPresentWidth:16384 height:16384]); // Two targets alone exceed cap.
     const auto actual = renderer.configuration;
     CHECK(actual.width == c.width && actual.height == c.height && actual.range == c.range &&
           actual.siting == c.siting && actual.generation == c.generation && actual.maxPacketSize == c.maxPacketSize);
     id<MTLDevice> device = queue.device;
     id<MTLTexture> target = [device newTextureWithDescriptor:targetDescriptor(256, 128)]; CHECK(target);
+    const uint64_t bytes = target.allocatedSize, cap = MLPyrowaveSessionAllocationCap;
+    CHECK(bytes && bytes < cap / 2);
+    CHECK(MLPyrowavePresentationFitsBudget(cap - 2 * bytes, bytes, 2));
+    CHECK(!MLPyrowavePresentationFitsBudget(cap - 2 * bytes + 1, bytes, 2));
     id<MTLTexture> emptyFit = [device newTextureWithDescriptor:targetDescriptor(1, 2)]; CHECK(emptyFit);
     auto *memorylessDescriptor = targetDescriptor(256, 128);
     memorylessDescriptor.storageMode = MTLStorageModeMemoryless;

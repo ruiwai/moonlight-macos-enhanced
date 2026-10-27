@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #import "MLPyrowavePacketBridge.h"
 
+int MLPyrowaveOfferedFormats(int preference, BOOL preflightReady, int legacyFormats)
+{
+    if (preference != 3) return legacyFormats;
+    return VIDEO_FORMAT_H264 | (preflightReady ? VIDEO_FORMAT_PYROWAVE : 0);
+}
+
 BOOL MLPyrowaveValidatePresentationConfiguration(MLPyrowaveConfiguration c, int frameRate)
 {
     return c.generation != 0 && c.maxPacketSize >= 129 && c.maxPacketSize <= 65536 &&

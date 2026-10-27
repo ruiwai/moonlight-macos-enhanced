@@ -1839,7 +1839,9 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
     self.overlayContainer.hidden = NO;
     
     NSString *codecString = @"Unknown";
-    if (videoFormat & VIDEO_FORMAT_MASK_H264) {
+    if (videoFormat == VIDEO_FORMAT_PYROWAVE) {
+        codecString = @"PyroWave";
+    } else if (videoFormat & VIDEO_FORMAT_MASK_H264) {
         codecString = @"H.264";
     } else if (videoFormat & VIDEO_FORMAT_MASK_H265) {
         if (videoFormat & VIDEO_FORMAT_MASK_10BIT) {

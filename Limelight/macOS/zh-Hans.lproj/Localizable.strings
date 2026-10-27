@@ -2043,3 +2043,5 @@
 "Uses the Default Profile" = "使用默认配置";
 "Hosts using Default %d" = "%d 台主机正在使用";
 "Reset to Default Profile…" = "恢复为默认配置…";
+"PyroWave (Experimental)" = "PyroWave（实验性）";
+"Video codec warning PyroWave experimental" = "实验性 Apple Silicon Metal 路径：仅支持 SDR BT.709、8 位 4:2:0。已保存的 HDR、10 位、4:4:4 和渲染器偏好保持不变，仅覆盖本次会话的有效配置。不可用时初始回退至 H.264。GPU 正确性及主机互操作性尚未验证。";

@@ -52,6 +52,15 @@ static uint64_t MLPyrowaveNowUs(void *context) {
     return LiGetMicroseconds();
 }
 
+static BOOL MLPyrowaveBackingSize(OSView *view, NSUInteger *width, NSUInteger *height) {
+    if (!view) return NO;
+    NSSize size = [view convertRectToBacking:view.bounds].size;
+    double w = ceil(size.width), h = ceil(size.height);
+    if (!isfinite(w) || !isfinite(h) || w <= 0 || h <= 0 || w > 16384 || h > 16384) return NO;
+    *width = (NSUInteger)w; *height = (NSUInteger)h;
+    return YES;
+}
+
 @interface VideoDecoderRenderer () <MTKViewDelegate>
 @property (nonatomic) int frameRate;
 - (void)resetVideoParameterSetState;
@@ -1480,6 +1489,10 @@ static BOOL MLGetSharedMetalPipelines(MTLPixelFormat pixelFormat,
     BOOL _decoderStopped;
     MLPyrowaveMetalRenderer *_pyrowavePeer;
     BOOL _pyrowaveMode, _pyrowaveDrawPending;
+    BOOL _pyrowavePreflightReady;
+    MLPyrowaveConfiguration _pyrowavePreflightConfiguration;
+    int _pyrowavePreflightFrameRate;
+    id<MTLCommandQueue> _pyrowavePreflightQueue;
     uint64_t _pyrowaveEpoch;
     NSUInteger _lastLoggedDrawableWidth;
     NSUInteger _lastLoggedDrawableHeight;
@@ -1789,6 +1802,7 @@ static CGDirectDisplayID getDisplayID(NSScreen* screen)
 
 - (void)prewarmPresentationForStreamConfig:(StreamConfiguration *)streamConfig
 {
+    if (streamConfig.videoCodecPreference == 3) return; // Keep experimental preflight fresh; fallback setup stays legacy.
     if (streamConfig == nil) {
         return;
     }
@@ -2998,6 +3012,52 @@ static CGDirectDisplayID getDisplayID(NSScreen* screen)
     }
 }
 
+- (BOOL)preflightPyrowaveWithConfiguration:(MLPyrowaveConfiguration)configuration
+                                frameRate:(int)frameRate error:(NSError **)error
+{
+    if (error) *error = nil;
+    if (!MLPyrowaveValidatePresentationConfiguration(configuration, frameRate) ||
+        configuration.width > 8192 || configuration.height > 8192) {
+        if (error) *error = [NSError errorWithDomain:@"MLPyrowavePreflight" code:1
+            userInfo:@{NSLocalizedDescriptionKey: @"Invalid PyroWave configuration/FPS or host dimensions above 8192"}];
+        return NO;
+    }
+    if (![NSThread isMainThread]) {
+        if (error) *error = [NSError errorWithDomain:@"MLPyrowavePreflight" code:1
+            userInfo:@{NSLocalizedDescriptionKey: @"PyroWave preflight requires a fresh main-thread renderer"}];
+        return NO;
+    }
+    [_decodeSubmitLock lock];
+    _pyrowavePreflightReady = NO; _pyrowavePreflightQueue = nil;
+    BOOL ready = NO;
+    NSError *failure = nil;
+    do {
+        if (_decoderStopped || videoFormat != 0 || _pyrowaveMode || _pyrowavePeer || !_device || !_view) break;
+        id<MTLCommandQueue> queue = _commandQueue ?: [_device newCommandQueue];
+        if (!queue || queue.device != _device) break;
+        NSUInteger width, height;
+        if (!MLPyrowaveBackingSize(_view, &width, &height)) break;
+        @autoreleasepool {
+            NSError *peerError = nil;
+            MLPyrowaveMetalRenderer *peer = [MLPyrowaveMetalRenderer
+                rendererWithCommandQueue:queue configuration:configuration
+                clock:MLPyrowaveNowUs context:NULL error:&peerError];
+            failure = peerError;
+            ready = peer && [peer canPresentWidth:width height:height];
+        } // No submissions: all temporary peer resources drain BEFORE publication/return.
+        if (ready) {
+            _pyrowavePreflightConfiguration = configuration;
+            _pyrowavePreflightFrameRate = frameRate;
+            _commandQueue = _pyrowavePreflightQueue = queue;
+            _pyrowavePreflightReady = YES;
+        }
+    } while (NO);
+    if (!ready && error) *error = failure ?: [NSError errorWithDomain:@"MLPyrowavePreflight" code:1
+        userInfo:@{NSLocalizedDescriptionKey: @"PyroWave requires live renderer device/queue, finite backing size 1..16384 and two drawables within 256 MiB"}];
+    [_decodeSubmitLock unlock];
+    return ready;
+}
+
 - (BOOL)setupPyrowaveWithConfiguration:(MLPyrowaveConfiguration)configuration
                             frameRate:(int)frameRate error:(NSError **)error
 {
@@ -3014,7 +3074,13 @@ static CGDirectDisplayID getDisplayID(NSScreen* screen)
         // Fresh instance only: prewarmed resources may exist, reconfiguration may not.
         if (![NSThread isMainThread] || videoFormat != 0 || _decoderStopped ||
             _pyrowaveMode || _pyrowavePeer || !_device || !_view) break;
-        id<MTLCommandQueue> queue = _commandQueue ?: [_device newCommandQueue];
+        const MLPyrowaveConfiguration p = _pyrowavePreflightConfiguration;
+        if (!_pyrowavePreflightReady || frameRate != _pyrowavePreflightFrameRate ||
+            configuration.width != p.width || configuration.height != p.height ||
+            configuration.range != p.range || configuration.siting != p.siting ||
+            configuration.generation != p.generation || configuration.maxPacketSize > p.maxPacketSize ||
+            _commandQueue != _pyrowavePreflightQueue) break;
+        id<MTLCommandQueue> queue = _pyrowavePreflightQueue;
         if (!queue || queue.device != _device) break;
         MTKView *candidate = _metalView ?: [[MTKView alloc] initWithFrame:_view.bounds device:_device];
         CAMetalLayer *layer = (CAMetalLayer *)candidate.layer;
@@ -3026,6 +3092,9 @@ static CGDirectDisplayID getDisplayID(NSScreen* screen)
             rendererWithCommandQueue:queue configuration:configuration
             clock:MLPyrowaveNowUs context:NULL error:error];
         if (!peer) break; // Locals retire without changing existing renderer/UI.
+        NSUInteger width, height;
+        if (!MLPyrowaveBackingSize(_view, &width, &height) ||
+            ![peer canPresentWidth:width height:height]) break; // Recheck resize before publication.
         // Dedicated transactional setup: no legacy setup, drawable acquisition or prewarm.
         _commandQueue = queue;
         _metalView = candidate;
@@ -3066,7 +3135,7 @@ static CGDirectDisplayID getDisplayID(NSScreen* screen)
     if (color) CFRelease(color);
     if (!ready && error && !*error) *error = [NSError errorWithDomain:@"MLPyrowaveSetup"
         code:1 userInfo:@{NSLocalizedDescriptionKey:
-            @"PyroWave requires fresh main-thread SDR renderer and valid Metal session"}];
+            @"PyroWave requires fresh main-thread renderer, matching preflight config/FPS/queue and valid two-drawable budget"}];
     [_decodeSubmitLock unlock];
     return ready;
 }
@@ -3106,6 +3175,7 @@ static CGDirectDisplayID getDisplayID(NSScreen* screen)
                 streamConfig:(StreamConfiguration *)streamConfig
 {
     [_decodeSubmitLock lock];
+    _pyrowavePreflightReady = NO; _pyrowavePreflightQueue = nil;
     if (videoFormat == VIDEO_FORMAT_PYROWAVE) {
         [_decodeSubmitLock unlock];
         return; // No legacy codec alias or implicit PyroWave reconfiguration.
@@ -5147,6 +5217,7 @@ void decompressionOutputCallback(void *decompressionOutputRefCon, void *sourceFr
         // Drawable acquisition can block. Never hold the receive/stop lock here.
         id<CAMetalDrawable> drawable = view.currentDrawable;
         if (!drawable) return; // Backend pending frame remains owned there.
+        if (![peer canPresentWidth:drawable.texture.width height:drawable.texture.height]) return;
         [_decodeSubmitLock lock];
         if (_decoderStopped || !_pyrowaveMode || _pyrowaveEpoch != epoch ||
             _pyrowavePeer != peer || self.presentationSuspended) {
@@ -5876,6 +5947,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     // stopping it waits for that callback. A frame already being decoded finishes first.
     [_decodeSubmitLock lock];
     _decoderStopped = YES;
+    _pyrowavePreflightReady = NO; _pyrowavePreflightQueue = nil;
     [_pyrowavePeer stop];
     _pyrowavePeer = nil;
     _pyrowaveEpoch++;

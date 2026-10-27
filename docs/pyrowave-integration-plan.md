@@ -2,7 +2,7 @@
 
 ## Status, pins and scope
 
-Common raw bridge version 2 at `9af0c8c` retains SDR negotiation introduced at `e26d480`. Conditional app receive-to-present wiring now exists; selection/preflight remains absent and PyroWave is not offered. Production compilation and live validation of this change are unverified.
+Common raw bridge version 2 at `9af0c8c` retains SDR negotiation introduced at `e26d480`. Explicit experimental selection now gates offering PyroWave on actual-renderer preflight. Production compilation, GPU correctness and live interoperability of this change are unverified; native build awaits Actions.
 Native Common pin: `9af0c8cc9be21afce5c735c7876ba03884f7d84c`. Historical parent `f1c45a8` app [run 40481438739](https://github.com/ruiwai/moonlight-macos-enhanced/actions/runs/40481438739) passed.
 That app log contains all eight native PyroWave `CompileC` units once each, plus Common `PyrowaveProtocol.c` / `PyrowaveReassembly.c` once each; no PBX edits were needed.
 Successful compilation/linking does not establish class/symbol retention under dead stripping, live wiring, or readiness; retention remains unknown.
@@ -11,7 +11,7 @@ Wire contract: protocol **2**, bitstream **2**, payload **3**; exact encoder ref
 Initial scope: supported Apple Silicon, SDR BT.709, 8-bit 4:2:0, negotiated range/siting; FP32 arithmetic **and storage**. HDR/444/10-bit and FP16 are deferred.
 Local designs `docs/pyrowave-protocol-contract.md` and `docs/pyrowave-metal-decoder.md` provide background, not tracked remote documents or current dependency/build inventory.
 Their older missing-dependency statements do not describe this baseline; neither design is changed here.
-Existing symbols below are source anchors. **Common raw descriptor/route/gates and negotiation are implemented. App receive-to-present wiring is implemented below; remaining selection/preflight and broader design sections are PROPOSED, not enablement.**
+Existing symbols below are source anchors. **Common negotiation, app receive-to-present wiring and explicit preflight/selection are implemented. Broader PROPOSED sections remain design/acceptance requirements, not readiness evidence.** See [Foundation testing](pyrowave-foundation-testing.md) for the vanilla host pin and honest test boundary.
 
 ## Current → planned call path and selection
 
@@ -19,8 +19,8 @@ Existing symbols below are source anchors. **Common raw descriptor/route/gates a
 
 | Existing file:symbol | Current responsibility → planned app/integration work |
 | --- | --- |
-| `Native/Limelight/Stream/Connection.m:DrDecoderSetup`, `_drCallbacks`, `RegisterConnection` | Legacy setup plus exact PyroWave main-thread setup and explicit-context packet descriptor; preflight/selection remains planned. |
-| `Common/src/RtspConnection.c:performRtspHandshakeCtx` | Implemented bounded five-attribute PyroWave parser/helper and per-context retained contract → app opt-in/preflight remains planned. |
+| `Native/Limelight/Stream/Connection.m:DrDecoderSetup`, `_drCallbacks`, `RegisterConnection` | Legacy setup plus exact PyroWave main-thread setup, explicit-context packet descriptor and actual-renderer preflight-gated experimental offer. |
+| `Common/src/RtspConnection.c:performRtspHandshakeCtx` | Implemented bounded five-attribute PyroWave parser/helper and per-context retained contract; unchanged by app opt-in. |
 | `Common/src/SdpGenerator.c:getAttributesList` | Implemented selected SDR contract validation and ANNOUNCE feature/attributes; unselected legacy output remains unchanged. |
 | `Common/src/RtpVideoQueue.c:RtpvAddPacket` | Implemented selected PyroWave version-2 route bypasses legacy FEC, contiguous RTP sequence and 16-bit frame-index rejection; preserves full outer identity/timing → conditional app coordinator owns reassembly. |
 | `Common/src/VideoDepacketizer.c:queueRtpPacketCtx` | Implemented selected PyroWave raw hook before millisecond conversion/legacy H.26x processing; validates bounds, borrows synchronously and frees → production protocol adapter forwards to renderer. |
@@ -33,14 +33,14 @@ Bounds input lengths and arithmetic; rejects missing, malformed, duplicate/confl
 Requires local **and** peer 2/2/3, negotiated packet budget within Common's 65..65536 inner-packet bounds and viable outer RTP/NV budget (inner >128).
 Requires REASSEMBLY, FRAME_DEADLINE, BLOCK_AWARE_FEC, FRAME_METADATA, selected SDR709/420 mode and selected limited/full-range capabilities; retains the result per context.
 ANNOUNCE emits the five `x-ml-pyrowave.*` fields and feature flag only for that negotiated capable path, never for unselected/fallback sessions.
-The raw callback path enforces negotiated inner-packet size. PROPOSED app validation must match frame color/depth/sampling/siting to the session; no unsupported modes or partial frames.
-PROPOSED app selection: only explicit PyroWave preference may offer the PyroWave/H.264 fallback mask, after actual-device + dimensions + compiled-pipeline/full-footprint preflight.
-Auto and legacy masks remain unchanged. If preflight fails, disclose unavailability/initial H.264 fallback; never advertise an incapable PyroWave path.
-Expose capability to `Limelight/macOS/ViewControllers/SettingsVideoPane.swift` and `Connection.m` only after full preflight.
-Propagate an explicit new preference through `SettingsModel+DerivedValues.swift:videoCodecs`, `SettingsModel+Persistence.swift`, `SettingsObjCBridge.swift`,
-and `StreamViewController.m` (currently clamps codec indices to 0..2) before `Connection.m` constructs masks.
-Preserve all existing stored indices; handle the new value explicitly rather than extending Connection's legacy ordinal comparisons.
-Display actual negotiated format and initial fallback reason without rewriting saved preference; no in-stream codec switch.
+The raw callback path enforces negotiated inner-packet size; app validators require matching color/depth/sampling/siting and complete frames.
+Only explicit index 3, `PyroWave (Experimental)`, may offer PyroWave/H.264 after actual device/queue, configuration, compiled-pipeline and full-footprint preflight.
+The codec list has no Auto. Default H.264 and legacy indices/masks 0..2 remain unchanged. Failed preflight offers H.264 only and logs the localized NSError reason.
+`Connection.m` adds `CAPABILITY_PYROWAVE` only on success, after callbacks and dynamic/color/packet fields are resolved; legacy direct/pull/submit flags remain for fallback.
+Persistence/ObjC bridging remain list-based with no new key; `StreamViewController.m` accepts explicit value 3, otherwise preserves the legacy 0..2 clamp, and excludes PyroWave from legacy risk assessment.
+Experimental sessions override HDR/10-bit/444 to SDR709/8-bit/420 and use the dedicated Metal peer; saved HDR/chroma/renderer preferences remain untouched.
+Prewarm skips index 3. Setup requires a fresh exact preflight queue/config/FPS match and host inner packet maximum no greater than preflight; selected PyroWave avoids CVDisplayLink.
+Logs and diagnostics identify actual negotiated format/initial fallback without rewriting preference or switching codec midstream. No HTTP codec parameter is added.
 
 ## Raw Common and conditional app ownership implemented
 
@@ -51,7 +51,7 @@ Version 2 borrows immutable inner packet bytes/length, full outer frame ID and R
 Submission is synchronous; retain nothing borrowed. Common owns/frees the RTP allocation once after return, also on raw-path drops; callbacks must not free it or synchronously stop/destroy Common.
 `queueRtpPacketCtx` checks runtime RTP/extension/NV lengths and raw bounds before dispatch, before microsecond truncation or `processRtpPayload`.
 No callback when unselected; `VideoStream.c:startVideoStreamCtx` already rejects selected PyroWave without capability, submit or descriptor version 2 before setup/sockets.
-The raw route returns without legacy decode-unit/IDR processing; unselected legacy ownership remains unchanged. The app registers `MLPyrowaveCallbacksForSink(self)` after callback initialization, without offering a format or capability.
+The raw route returns without legacy decode-unit/IDR processing; unselected legacy ownership remains unchanged. The app registers `MLPyrowaveCallbacksForSink(self)` after callback initialization; format/capability offering is separately gated by explicit selection and preflight.
 The nonretaining explicit-context protocol adapter forwards synchronously through a strong Connection renderer snapshot; registry/strong terminate ownership retains its context through Common cleanup/join. No TLS or borrowed packet escapes.
 Context remains valid until the receive thread joins. `VideoStream.c:stopVideoStreamCtx` calls stop **before** joins, cleanup **after** joins:
 submissions may follow stop and be discarded, but never follow cleanup. A callback extension must preserve this existing contract.
@@ -117,7 +117,7 @@ Verify actual single compilation/link ownership in macOS CI, including synchroni
 
 | Gate / owner | Required evidence, not supplied by architecture |
 | --- | --- |
-| RTSP/SDP + Connection | Common helper/serializer synthetic cases passed on macOS with fatal ASan/UBSan (run 40400754728); app preflight/selection/fallback reporting and live RTSP remain future gates. |
+| RTSP/SDP + Connection | Common helper/serializer synthetic cases passed on macOS with fatal ASan/UBSan (run 40400754728); app preflight/selection/fallback reporting is implemented but native execution and live RTSP remain unverified. |
 | Actual RTP → raw callback | Common bridge test covers short RTP/NV/extensions, nonzero sequence, full outer frame-ID reorder/wrap, exact identity/microseconds, gates and context isolation, plus v2 watchdog result routing/filter helper. Synthetic arbitrary payload only: no actual owned PYRF/TLV/codec/deadline validator composition. Still require that composition and live encrypted/network reorder/wrap/replay/watchdog, inner/outer identity conflicts, ownership and loss/deadline/block-FEC coverage end-to-end. |
 | Existing CPU validator composition | Extend `tests/pyrowave/test_metadata.c`, `test_reassembly.c`, `test_codec.cpp`, `test_pipeline.cpp` as appropriate; preserve owned bytes/offsets/metadata/identity, poison/reset and bounded mutation coverage. |
 | Codec → GPU differential | Exact pinned **GPU encoder fixtures** and agreed per-plane error bounds for FP32, sparse/zero bands, edges and dimensions. Current `test_packetizer.cpp` uses synthetic packetizer inputs, **not GPU encoder fixtures**. |
@@ -140,4 +140,4 @@ Setup is main-only/fresh-instance-only (no PyroWave reconfiguration); CPU app-bo
 Dedicated setup enforces BGRA8Unorm/ITUR709/EDR-off, framebuffer-only, two drawables and timeout; it never calls legacy setup/prewarm, acquires a drawable or commits. The selected Common dynamic-range mode must explicitly be SDR, independently of preferences.
 Validated CPU packets coalesce one weak main draw notification; drawable acquisition is outside the submit/stop lock. Stop drops the peer and invalidates epochs before teardown; queued draws/presented callbacks recheck epochs.
 Only drawable presentation records rendered/first-frame statistics, with enqueue time 0 (no unverified clock-domain latency); GPU completion is not display acknowledgement.
-Local static checks are not native compilation. No `supportedVideoFormats`, `CAPABILITY_PYROWAVE`, settings or Auto change; future preflight-selection gating, macOS build/GPU and live-host evidence remain required before any enablement claim.
+Local static checks are not native compilation. Only explicit experimental selection changes the offered formats/capability after preflight; macOS build, GPU and live-host evidence remain required before a functionality claim. Hardware-test skip means skipped, never passed.

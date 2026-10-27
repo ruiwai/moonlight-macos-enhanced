@@ -7,6 +7,9 @@ NS_ASSUME_NONNULL_BEGIN
 // CPU app-boundary shape only, NOT GPU availability or session-budget proof.
 FOUNDATION_EXPORT BOOL MLPyrowaveValidatePresentationConfiguration(
     MLPyrowaveConfiguration c, int frameRate);
+// Explicit preference index 3 only; caller supplies actual preflight result.
+// Mask policy is not GPU availability/correctness evidence.
+FOUNDATION_EXPORT int MLPyrowaveOfferedFormats(int preference, BOOL preflightReady, int legacyFormats);
 
 @protocol MLPyrowavePacketSink <NSObject>
 // Synchronous borrow only; return the Common CPU validation result unchanged.

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT AND GPL-3.0-only
 // Host dispatch/view algorithms adapted from the pin in pyrowave-metal-provenance.md.
 #import "MLPyrowaveMetalDecoder.h"
+#include "MLPyrowavePresentationBudget.h"
 #include "MLPyrowaveReceiver.hpp"
 #include <os/lock.h>
 #include <algorithm>
@@ -9,7 +10,7 @@
 #include <limits>
 
 namespace {
-constexpr uint64_t MiB = 1024 * 1024, Cap = 256 * MiB, Payload = 16 * MiB + 16;
+constexpr uint64_t MiB = 1024 * 1024, Payload = 16 * MiB + 16;
 constexpr MTLTextureUsage ReadWrite = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
 constexpr MTLResourceOptions Shared = MTLResourceStorageModeShared | MTLResourceHazardTrackingModeTracked;
 struct Layout {
@@ -64,7 +65,7 @@ bool LayoutBudget(const MLPyrowave::CodecSession &s, uint64_t maxBuffer, Layout 
         !Mul(owner, 2, owners) || !Add(128 * MiB + 32 * MiB + MiB, owners, l.cpuReserve))
         return false;
     l.count = uint32_t(count);
-    return l.cpuReserve < Cap && l.offsetBytes <= std::numeric_limits<NSUInteger>::max();
+    return l.cpuReserve < MLPyrowaveSessionAllocationCap && l.offsetBytes <= std::numeric_limits<NSUInteger>::max();
 }
 id Fail(NSError **error, NSString *message)
 {
@@ -216,7 +217,7 @@ bool AllocateHeaps(MLPyrowaveMetalPool *p, MTLTextureDescriptor * __strong const
         }
     if (!PaddedSize([d heapBufferSizeAndAlignWithLength:Payload options:Shared], sharedSize) ||
         !PaddedSize([d heapBufferSizeAndAlignWithLength:p->layout.offsetBytes options:Shared], sharedSize) ||
-        !Add(privateSize, sharedSize, sum) || !Add(sum, p->layout.cpuReserve, sum) || sum > Cap) {
+        !Add(privateSize, sharedSize, sum) || !Add(sum, p->layout.cpuReserve, sum) || sum > MLPyrowaveSessionAllocationCap) {
         Fail(error, @"Decoder buffer heap query invalid/overflowed, or CPU reservation plus padded heaps exceeds 256 MiB");
         return false; // BEFORE either heap is created; no growing upload storage.
     }
@@ -231,7 +232,7 @@ bool AllocateHeaps(MLPyrowaveMetalPool *p, MTLTextureDescriptor * __strong const
         p->privateHeap.storageMode != MTLStorageModePrivate || p->sharedHeap.storageMode != MTLStorageModeShared ||
         p->privateHeap.size < privateSize || p->sharedHeap.size < sharedSize ||
         !Add(p->privateHeap.size, p->sharedHeap.size, p->gpuBytes) ||
-        !Add(p->gpuBytes, p->layout.cpuReserve, sum) || sum > Cap) {
+        !Add(p->gpuBytes, p->layout.cpuReserve, sum) || sum > MLPyrowaveSessionAllocationCap) {
         Fail(error, @"Decoder fixed heaps allocation/device/storage/size validation failed or actual heaps plus CPU reservation exceeds 256 MiB");
         return false;
     }
@@ -318,6 +319,7 @@ bool EncodeIDWT(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
     if (self) { _pool = pool; _configuration = pool->configuration; }
     return self;
 }
+- (uint64_t)sessionAllocationBytes { return _pool->gpuBytes + _pool->layout.cpuReserve; }
 + (instancetype)decoderWithKernels:(MLPyrowaveMetalKernels *)kernels
                        commandQueue:(id<MTLCommandQueue>)commandQueue
                       configuration:(MLPyrowaveConfiguration)configuration

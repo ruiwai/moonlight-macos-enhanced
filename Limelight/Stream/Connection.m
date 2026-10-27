@@ -937,6 +937,10 @@ int DrDecoderSetup(int videoFormat, int width, int height, int redrawRate, void*
     if (renderer == nil) {
         return -1;
     }
+    if (conn->_rendererStreamConfig.videoCodecPreference == 3) {
+        Log(LOG_I, @"[pyrowave] Actual negotiated video format=0x%X: %@", videoFormat,
+            videoFormat == VIDEO_FORMAT_PYROWAVE ? @"PyroWave selected" : @"legacy (initial fallback)");
+    }
     if (videoFormat == VIDEO_FORMAT_PYROWAVE) {
         StreamConfiguration *config = conn->_rendererStreamConfig;
         if (!config || config.enableHdr || config.enable10BitSdr || config.enableYuv444 ||
@@ -4467,6 +4471,13 @@ void ClClipboardDataReceived(const uint8_t *data, uint32_t length)
 -(id) initWithConfig:(StreamConfiguration*)config renderer:(VideoDecoderRenderer*)myRenderer connectionCallbacks:(id<ConnectionCallbacks>)callbacks
 {
     self = [super init];
+    if (config.videoCodecPreference == 3) {
+        // Runtime configuration only; never rewrite persisted HDR/chroma/renderer choices.
+        config.enableHdr = NO;
+        config.enable10BitSdr = NO;
+        config.enableYuv444 = NO;
+        config.allowHevc = NO;
+    }
 
     _connectionLayoutCompatible = LiIsConnectionContextLayoutCompatible(
         sizeof(ML_CONNECTION_CONTEXT), offsetof(ML_CONNECTION_CONTEXT, controlContext),
@@ -4762,10 +4773,10 @@ void ClClipboardDataReceived(const uint8_t *data, uint32_t length)
     if (@available(iOS 11.3, tvOS 11.3, macOS 10.14, *)) {
         hevcDecodeSupported = VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC);
     }
-    BOOL hevcSupported = codecPreference >= 1 && hevcDecodeSupported;
+    BOOL hevcSupported = (codecPreference == 1 || codecPreference == 2) && hevcDecodeSupported;
     // Without an AV1 hardware decoder (before Apple M3) AV1 is decoded in software.
     const BOOL av1SoftwareOnly = MLAV1SoftwareDecodeNeeded();
-    BOOL av1Supported = codecPreference >= 2;
+    BOOL av1Supported = codecPreference == 2;
 
     // If HDR is requested, at least one 10-bit codec path must be available.
     assert(!(config.enableHdr || config.enable10BitSdr) || hevcSupported || av1Supported);
@@ -4943,6 +4954,39 @@ void ClClipboardDataReceived(const uint8_t *data, uint32_t length)
     _clCallbacks.ds5HapticsPcm = physicalDs5Audio ? ClDs5HapticsPcm : NULL;
     _clCallbacks.ds5HapticsIrV2 = physicalDs5Audio ? NULL : ClDs5HapticsIrV2;
     Log(LOG_I, @"[controller-haptics] Negotiation mode=%@", physicalDs5Audio ? @"USB-PCM" : @"Bluetooth-IR-v2");
+
+    if (config.videoCodecPreference == 3) {
+        MLPyrowaveConfiguration pyro = {(uint32_t)_streamConfig.width, (uint32_t)_streamConfig.height,
+            _streamConfig.packetSize > 16 ? (uint32_t)(_streamConfig.packetSize - 16) : 0,
+            _streamConfig.colorRange == COLOR_RANGE_FULL ? 0 : 1, 0, 1};
+        const int fps = _streamConfig.fps;
+        __block BOOL ready = NO;
+        __block NSError *error = nil;
+        if (renderer && _streamConfig.dynamicRangeMode == DYNAMIC_RANGE_MODE_SDR &&
+            _streamConfig.colorSpace == COLORSPACE_REC_709 &&
+            (_streamConfig.colorRange == COLOR_RANGE_FULL || _streamConfig.colorRange == COLOR_RANGE_LIMITED) &&
+            _streamConfig.width > 0 && _streamConfig.height > 0 && fps > 0 &&
+            _streamConfig.packetSize > 16 && _streamConfig.packetSize <= 65552 &&
+            MLPyrowaveValidatePresentationConfiguration(pyro, fps)) {
+            void (^preflight)(void) = ^{
+                ready = [renderer preflightPyrowaveWithConfiguration:pyro frameRate:fps error:&error];
+            };
+            // No connection state lock is held while synchronously entering the main thread.
+            if ([NSThread isMainThread]) preflight();
+            else dispatch_sync(dispatch_get_main_queue(), preflight);
+        } else {
+            error = [NSError errorWithDomain:@"MLPyrowavePreflight" code:1 userInfo:@{
+                NSLocalizedDescriptionKey: @"PyroWave requires a renderer, SDR BT.709, valid range, dimensions/FPS and inner packet size 129..65536"}];
+        }
+        _streamConfig.supportedVideoFormats = MLPyrowaveOfferedFormats(
+            config.videoCodecPreference, ready, _streamConfig.supportedVideoFormats);
+        if (ready) {
+            _drCallbacks.capabilities |= CAPABILITY_PYROWAVE;
+            Log(LOG_I, @"[pyrowave] PyroWave offered (H.264 initial fallback available)");
+        } else {
+            Log(LOG_W, @"[pyrowave] PyroWave unavailable; offering H.264 fallback: %@", error.localizedDescription);
+        }
+    }
 
     return self;
 }
