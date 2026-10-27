@@ -10,10 +10,23 @@ only so far; standalone draw-gate C11/C++14 checks passed with ASan/UBSan.
 
 ## Implemented changes and limits
 
+- CPU duplicate-packet arena /v1 reuses one bounded allocation for the native
+  saved-packet table and wire bytes, removing that allocation churn after warmup.
+  Full original bytes are still copied and exact duplicates still use memcmp.
+  Full retained high-water capacity is charged to the cap and freed on destroy;
+  growth frees before allocating, with no overlap. Common allocations remain.
+  CI-only whitebox counting/context+arena fault injection is pending execution;
+  Common allocation fault paths are not injected. This is not zero-copy or a
+  speedup claim: reassembly copy and shared GPU upload copy remain.
+  No direct-to-Metal ownership or precision change is included.
 - Receiver recovery copies into owned payload+16-byte-guard scratch once.
+  `CodecBytes`, a C++14 stateless allocator-backed overwrite byte vector, removes
+  payload preclear; complete exact-length copy initializes payload before validation.
+  Only the 16 guards are zero-initialized before publication, not the payload.
   Session `CodecValidator` caches immutable layout masks; `ValidateOwned` fully
   validates before moving scratch into the immutable frame, avoiding a second
-  payload copy. The borrowed-input convenience wrapper still copies on success.
+  payload copy. The borrowed-input wrapper validates first, then copies payload
+  into overwrite storage and zeros its 16 guards before publication.
   Cached masks, offsets and vector capacities stay budgeted; OR/popcount counts
   pooled significant/sign bits without changing duplicate/validation semantics.
 - Dequant batches independent bands per component/level using grid.z=3 (levels
@@ -133,11 +146,13 @@ no performance gain was measured.
 Priorities are provisional until a matched hardware trace identifies bottlenecks.
 All filenames below refer to the native path above unless explicitly qualified.
 
-1. **CPU receive allocator/copy cost.** `MLPyrowaveReassembly.c`'s Push saves each
-   packet with malloc+memcpy for exact duplicate validation, in addition to Common
-   reassembly storage (`moonlight-common/moonlight-common-c/src/PyrowaveReassembly.c`).
-   `MLPyrowaveReceiver.cpp` constructs a value-initialized payload+16-byte vector;
-   CopyFrame overwrites its payload, then ValidateOwned validates and moves it.
+1. **CPU receive allocator/copy cost.** `MLPyrowaveReassembly.c`'s Push now saves
+   full wire bytes in a reusable bounded arena for exact duplicate validation,
+   in addition to Common reassembly allocations
+   (`moonlight-common/moonlight-common-c/src/PyrowaveReassembly.c`).
+   `MLPyrowaveReceiver.cpp` constructs overwrite-initialized payload+16-byte storage;
+   complete exact-length CopyFrame writes payload before ValidateOwned reads it,
+   zeros only the 16 guards on success and moves ownership without another copy.
    `MLPyrowaveMetalDecoder.mm` submit memcpy's into shared storage and converts
    byte offsets to word offsets again. A bounded persistent arena/direct-to-shared
    validated-ownership experiment could eliminate work. Preserve byte-identical

@@ -5,6 +5,7 @@
 #define ML_PYROWAVE_CODEC_HPP
 
 #include "MLPyrowaveReassembly.h"
+#include "MLPyrowaveBytes.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -33,10 +34,11 @@ public:
     static std::unique_ptr<CodecValidator> Create(const CodecSession &) noexcept;
     // Exact size payloadLength+16, payload 8 bytes..16 MiB. Capacity (not just
     // size), cached masks and offsets must fit the 32 MiB storage budget.
+    // Precondition: first payloadLength bytes initialized; guards may be uninitialized.
     // Full validation precedes transfer; success preserves data() and zeros guards.
     // Failure returns null without moving bytes or publishing any frame.
     std::unique_ptr<const ValidatedCodecFrame> ValidateOwned(
-        std::vector<uint8_t> &&bytes, size_t payloadLength,
+        CodecBytes &&bytes, size_t payloadLength,
         const MLPyrowaveFrameInfo &info) const;
     CodecValidator(const CodecValidator &) = delete;
     CodecValidator &operator=(const CodecValidator &) = delete;
@@ -55,7 +57,7 @@ private:
 class ValidatedCodecFrame final {
 public:
     ~ValidatedCodecFrame() = default;
-    const std::vector<uint8_t> &bytes() const { return bytes_; }
+    const CodecBytes &bytes() const { return bytes_; }
     const std::vector<uint32_t> &offsets() const { return offsets_; }
     const CodecSession &session() const { return session_; }
     const MLPyrowaveFrameInfo &frameInfo() const { return info_; }
@@ -65,11 +67,11 @@ private:
     friend class CodecValidator;
     friend std::unique_ptr<const ValidatedCodecFrame> ValidateCodecFrame(
         const uint8_t *, size_t, const CodecSession &, const MLPyrowaveFrameInfo &);
-    ValidatedCodecFrame(std::vector<uint8_t> &&bytes, std::vector<uint32_t> &&offsets,
+    ValidatedCodecFrame(CodecBytes &&bytes, std::vector<uint32_t> &&offsets,
                         const CodecSession &session, const MLPyrowaveFrameInfo &info);
     ValidatedCodecFrame(const ValidatedCodecFrame &) = delete;
     ValidatedCodecFrame &operator=(const ValidatedCodecFrame &) = delete;
-    std::vector<uint8_t> bytes_; // Full input, then 16 initialized zero guard bytes.
+    CodecBytes bytes_; // Full input, then 16 initialized zero guard bytes.
     std::vector<uint32_t> offsets_; // BYTE offsets; UINT32_MAX means absent.
     CodecSession session_;
     MLPyrowaveFrameInfo info_; // Full envelope ID, RTP time, receive/deadline, metadata.

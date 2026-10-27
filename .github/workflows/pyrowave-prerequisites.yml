@@ -54,6 +54,12 @@ jobs:
             Limelight/Stream/PyroWave/MLPyrowaveMetadata.c \
             "$common/src/PyrowaveProtocol.c" "$common/src/PyrowaveReassembly.c" \
             -o "$RUNNER_TEMP/pyrowave-strict-reassembly-tests"
+          # The whitebox fixture includes the native adapter exactly once.
+          xcrun clang "${flags[@]}" -I "$common/src" -I Limelight/Stream/PyroWave \
+            tests/pyrowave/test_reassembly_arena.c \
+            Limelight/Stream/PyroWave/MLPyrowaveMetadata.c \
+            "$common/src/PyrowaveProtocol.c" "$common/src/PyrowaveReassembly.c" \
+            -o "$RUNNER_TEMP/pyrowave-reassembly-arena-tests"
 
       - name: Run Common goldens and native checks
         env:
@@ -64,6 +70,7 @@ jobs:
           "$RUNNER_TEMP/pyrowave-reassembly-golden-tests"
           "$RUNNER_TEMP/pyrowave-metadata-tests"
           "$RUNNER_TEMP/pyrowave-strict-reassembly-tests"
+          "$RUNNER_TEMP/pyrowave-reassembly-arena-tests"
 
       - name: Compile and run standalone codec checks with fatal sanitizers
         env:

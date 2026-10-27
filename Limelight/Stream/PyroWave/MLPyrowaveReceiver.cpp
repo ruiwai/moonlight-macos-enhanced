@@ -102,15 +102,17 @@ std::unique_ptr<const ReceivedFrame> Receiver::Receive(
             Discard(); return nullptr;
         }
         const size_t payloadLength = header.codecPayloadLength;
-        std::vector<uint8_t> scratch(payloadLength + 16);
+        CodecBytes scratch(payloadLength + 16);
         if (!Sample(now)) return nullptr;
         size_t length = 0;
         MLPyrowaveFrameInfo ownedInfo = {};
         if (MLPyrowaveReassemblyCopyFrame(reassembly_, now, scratch.data(), payloadLength,
-                &length, &ownedInfo) != LI_PYROWAVE_REASSEMBLY_COMPLETE) {
+                &length, &ownedInfo) != LI_PYROWAVE_REASSEMBLY_COMPLETE ||
+            length != payloadLength) {
             Discard(); return nullptr;
         }
         // Copy retires the watermark before validation/allocation can fail.
+        // Complete, exact-length copy initializes every payload byte before reads.
         auto codec = validator_->ValidateOwned(std::move(scratch), length, ownedInfo);
         if (!codec) { Discard(); return nullptr; }
         std::unique_ptr<const ReceivedFrame> result(new ReceivedFrame{

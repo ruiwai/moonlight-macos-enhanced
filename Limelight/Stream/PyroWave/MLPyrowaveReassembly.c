@@ -21,6 +21,8 @@ struct MLPyrowaveReassembly {
     LI_PYROWAVE_REASSEMBLY_STATE common;
     LI_PYROWAVE_PACKET_HEADER descriptor;
     SavedPacket *saved; /* blockCount slots plus one separate FRAME_HEADER. */
+    uint8_t *storage; /* Bounded high-water allocation retained until destroy. */
+    size_t capacity, used;
     uint32_t lastId;
     bool active;
     uint64_t firstUs, deadlineUs;
@@ -30,13 +32,9 @@ struct MLPyrowaveReassembly {
 static LI_PYROWAVE_REASSEMBLY_RESULT retire(
     MLPyrowaveReassembly *ctx, LI_PYROWAVE_REASSEMBLY_RESULT result)
 {
-    if (ctx->saved != NULL) {
-        for (uint32_t i = 0; i <= ctx->descriptor.blockCount; ++i) {
-            free(ctx->saved[i].bytes);
-        }
-    }
-    free(ctx->saved);
-    ctx->saved = NULL;
+    ctx->saved = NULL; /* Poison logical aliases, not retained arena capacity. */
+    ctx->used = 0;
+    ctx->firstUs = ctx->deadlineUs = 0;
     LiPyrowaveReassemblyReset(&ctx->common);
     ctx->active = false;
     ctx->savedBytes = ctx->commonBudget = ctx->parityBytes = 0;
@@ -60,6 +58,12 @@ static bool sameDescriptor(const LI_PYROWAVE_PACKET_HEADER *a,
         a->blockCount == b->blockCount;
 }
 
+static bool fitsTotal(uint64_t saved, uint64_t common)
+{
+    return saved + common + FRAME_LIMIT + LI_PYROWAVE_MAX_METADATA_SIZE +
+        sizeof(MLPyrowaveReassembly) + 2 * ALLOC_OVERHEAD < TOTAL_LIMIT;
+}
+
 static bool budgets(const LI_PYROWAVE_PACKET_HEADER *h,
                     uint64_t *savedTable, uint64_t *commonBudget)
 {
@@ -77,9 +81,7 @@ static bool budgets(const LI_PYROWAVE_PACKET_HEADER *h,
     *savedTable = table;
     *commonBudget = common;
     return h->protectedPayloadLength <= FRAME_LIMIT && body <= COMMON_PAYLOAD_LIMIT &&
-        saved <= SAVED_LIMIT && saved + common + FRAME_LIMIT +
-        LI_PYROWAVE_MAX_METADATA_SIZE + sizeof(MLPyrowaveReassembly) +
-        2 * ALLOC_OVERHEAD < TOTAL_LIMIT;
+        saved <= SAVED_LIMIT && fitsTotal(saved, common);
 }
 
 MLPyrowaveReassembly *MLPyrowaveReassemblyCreate(void)
@@ -99,6 +101,7 @@ void MLPyrowaveReassemblyDestroy(MLPyrowaveReassembly *ctx)
 {
     if (ctx != NULL) {
         (void)retire(ctx, LI_PYROWAVE_REASSEMBLY_ACCEPTED);
+        free(ctx->storage); /* Retirement retains storage; destruction releases it. */
         free(ctx);
     }
 }
@@ -116,10 +119,23 @@ static LI_PYROWAVE_REASSEMBLY_RESULT begin(
     if (nowUs > UINT64_MAX - DEADLINE_US) {
         return LI_PYROWAVE_REASSEMBLY_INVALID_PACKET;
     }
-    ctx->saved = calloc((size_t)h->blockCount + 1, sizeof(*ctx->saved));
-    if (ctx->saved == NULL) {
-        return LI_PYROWAVE_REASSEMBLY_OUT_OF_MEMORY;
+    const uint64_t tableBytes = ((uint64_t)h->blockCount + 1) * sizeof(SavedPacket);
+    const uint64_t required = tableBytes + ((uint64_t)h->blockCount + 1) *
+        (LI_PYROWAVE_WIRE_HEADER_SIZE + h->fecBlockPayloadSize);
+    /* Charge the full retained high-water capacity, even for a smaller frame. */
+    if (ctx->capacity < required || !fitsTotal(ctx->capacity + ALLOC_OVERHEAD, common)) {
+        free(ctx->storage); /* Free before growth: never overlap two arenas. */
+        ctx->storage = NULL;
+        ctx->capacity = 0;
+        ctx->storage = malloc((size_t)required);
+        if (ctx->storage == NULL) {
+            return LI_PYROWAVE_REASSEMBLY_OUT_OF_MEMORY;
+        }
+        ctx->capacity = (size_t)required;
     }
+    memset(ctx->storage, 0, (size_t)tableBytes); /* Only the active table prefix. */
+    ctx->saved = (SavedPacket *)ctx->storage;
+    ctx->used = (size_t)tableBytes;
     ctx->savedBytes = table;
     ctx->commonBudget = common;
     ctx->firstUs = nowUs;
@@ -219,15 +235,14 @@ LI_PYROWAVE_REASSEMBLY_RESULT MLPyrowaveReassemblyPush(
         }
         return LI_PYROWAVE_REASSEMBLY_DUPLICATE;
     }
-    if (size + ALLOC_OVERHEAD > SAVED_LIMIT - ctx->savedBytes) {
+    if (size + ALLOC_OVERHEAD > SAVED_LIMIT - ctx->savedBytes ||
+        ctx->used > ctx->capacity || size > ctx->capacity - ctx->used) {
         return retire(ctx, LI_PYROWAVE_REASSEMBLY_OVERSIZE);
     }
-    saved->bytes = malloc(size);
-    if (saved->bytes == NULL) {
-        return retire(ctx, LI_PYROWAVE_REASSEMBLY_OUT_OF_MEMORY);
-    }
+    saved->bytes = ctx->storage + ctx->used;
     memcpy(saved->bytes, packet, size);
     saved->length = size;
+    ctx->used += size;
     ctx->savedBytes += size + ALLOC_OVERHEAD;
     return pushCommon(ctx, &h, payload, nowUs);
 }

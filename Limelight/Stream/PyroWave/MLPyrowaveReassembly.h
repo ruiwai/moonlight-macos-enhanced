@@ -24,11 +24,12 @@ typedef struct MLPyrowaveFrameInfo {
  * padded DATA required even with no FEC (tooling only, not negotiation).
  * Conflicts/malformed packets poison the active frame. Retired IDs cannot
  * reopen; only modularly newer IDs (difference <2^31) can start another.
- * Create can return NULL; Destroy accepts NULL. No retained caller pointers.
+ * Create can return NULL; Destroy accepts NULL and releases retained storage.
+ * No retained caller pointers.
  */
 MLPyrowaveReassembly *MLPyrowaveReassemblyCreate(void);
 void MLPyrowaveReassemblyDestroy(MLPyrowaveReassembly *ctx);
-/* NULL-safe poison/retirement; preserves the replay watermark. */
+/* NULL-safe logical frame poison; preserves replay watermark and bounded storage capacity. */
 void MLPyrowaveReassemblyDiscardFrame(MLPyrowaveReassembly *ctx);
 LI_PYROWAVE_REASSEMBLY_RESULT MLPyrowaveReassemblyPush(
     MLPyrowaveReassembly *ctx, const uint8_t *packet, size_t size, uint64_t nowUs);

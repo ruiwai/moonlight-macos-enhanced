@@ -62,10 +62,14 @@ Common golden source lists and `src` includes match their CMake targets:
 - `test_metadata.c` + `MLPyrowaveMetadata.c`, using the pinned Common header.
 - `test_reassembly.c` + `MLPyrowaveReassembly.c` + `MLPyrowaveMetadata.c`
   + Common `PyrowaveProtocol.c` + `PyrowaveReassembly.c` (unchanged helpers).
+- `test_reassembly_arena.c` includes the native adapter once under test-only
+  malloc/calloc/free wrappers; links native metadata + both Common helpers
+  separately, unmodified. Counts cover only native adapter allocations, not
+  Common or the overall receive path; context/arena failures are CI-only.
 
 None of these targets has extra compile definitions. CI uses `xcrun clang`, C11,
 `-Wall -Wextra -Werror -g -O1 -fsanitize=address,undefined
--fno-omit-frame-pointer`, writes all four binaries to `RUNNER_TEMP`, and runs them
+-fno-omit-frame-pointer`, writes these five binaries to `RUNNER_TEMP`, and runs them
 with sanitizer failures fatal. These are synthetic transport checks, not real
 encoder bitstream conformance, codec decoding, GPU validation, or end-to-end
 streaming validation. A green job does not qualify the feature for enablement.
@@ -105,7 +109,8 @@ only for byte-identical duplicate checks, never as authoritative metadata.
 Retirement retains a frame-ID watermark: equal/older and exact half-range IDs
 are stale; strictly newer IDs recover after poison/expiry/copy (including wrap).
 Malformed active input, conflicting descriptors/duplicates, or allocation errors
-poison and clear storage. Identical duplicates do not extend the deadline.
+poison the logical frame, retaining bounded arena capacity and the watermark.
+Destroy frees retained storage. Identical duplicates do not extend the deadline.
 
 On supported 64-bit platforms preflight caps protected bytes at 16 MiB, metadata
 at 65535, packets at 65536, wireBlockCount*B at 40 MiB, and retained wire packets
@@ -131,8 +136,17 @@ Map from local design `docs/pyrowave-protocol-contract.md` requirements (not a t
   fuzz campaign and real encoder/GPU acceptance remain unfulfilled requirements.
 - Live negotiation interoperability, real encoder compatibility, codec decoding, and GPU
   lifetime/validation remain pending; synthetic fixtures prove none of these.
-Allocation failures are handled but not fault-injected/tested; reassembly CI passed
-in run 40334474521. Local lint is not test execution.
+The bounded CPU duplicate arena /v1 combines saved table + wire bytes in one
+allocation, reusing same/smaller frames after warmup; only the table is cleared.
+Full wire copies and exact memcmp remain. Full high-water capacity is budgeted;
+growth frees before allocating, never overlaps arenas. CI-only whitebox checks
+cover counts, ownership, reuse/growth, context/arena failure injection, retirement,
+watermarks and copy output; execution of this patch is pending. Common allocation
+fault paths still are not injected. Historical strict reassembly CI run 40334474521
+is not evidence for this patch. Payload preclear is removed by the overwrite byte
+vector; 16 zero guards are retained. Reassembly copy, shared GPU upload copy and
+Common allocations remain: no zero-copy, direct-to-Metal,
+precision change or measured speedup. Local lint is not test execution.
 
 Local validation for this candidate is lint only; do not build or execute the
 golden tests locally:
@@ -159,7 +173,12 @@ object sizes/1024-byte bookkeeping must fit 32 MiB, using vector capacities
 Offsets are BYTE offsets to unique record headers; UINT32_MAX is absent. Guard
 bytes are initialized, but shader read safety is not certified. Receiver recovery
 copies once into owned scratch; `ValidateOwned` validates then moves it without
-a second payload copy. The borrowed-input wrapper still copies after validation.
+a second payload copy. C++14 stateless allocator-backed `CodecBytes` avoids payload
+preclear: complete exact-length copy writes payload before validation, then the
+16 guards are zeroed before publication. Count construction/resize without a
+value requires explicit writes before reads; explicit-value construction still fills.
+The borrowed-input wrapper validates first, copies payload into overwrite storage,
+then zeros guards. No direct shared-Metal storage or measured speedup is claimed.
 Immutable results snapshot envelope ID/timestamp/timing/metadata; failures publish
 nothing. Masks are cached per session; payload sign counts use OR/popcount.
 No clock comparison is performed in the codec; callers own expiry decisions.
@@ -168,6 +187,8 @@ Synthetic CHECK fixtures cover sparse/zero counts, ownership, both ranges/siting
 2/128/130 and CPU-only maximum dimensions, sequence/color/session conflicts,
 duplicate identity and zero-word termination, geometry, control/plane/sign bounds,
 quant167/168/200, excess/truncated/trailing bytes, input preflight, and atomic failure.
+Overwrite-byte fixtures cover explicit fills, initialized resize growth, copied
+payload, poisoned guards reset to zero, and pointer-stable vector/frame moves.
 Quant <=167 is an explicit pinned encoder-domain policy; zero control with nonzero
 q low nibble rejects the dequant/offset-scan ambiguity. Unused sign/padding values
 are ignored, but duplicate records must match every byte. Full-layout coverage is

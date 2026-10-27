@@ -14,7 +14,7 @@
     std::abort(); } } while (0)
 
 using namespace MLPyrowave;
-using Bytes = std::vector<uint8_t>;
+using Bytes = CodecBytes;
 
 static void put32(Bytes &b, size_t offset, uint32_t value)
 {
@@ -90,6 +90,29 @@ static std::unique_ptr<const ValidatedCodecFrame> validate(const Bytes &b,
         CHECK(owned->offsets() == borrowed->offsets());
     }
     return borrowed;
+}
+
+static void testOverwriteBytes()
+{
+    Bytes filled(8, 0xa5);
+    CHECK(std::all_of(filled.begin(), filled.end(), [](uint8_t b) { return b == 0xa5; }));
+    filled.resize(16); // Initialize newly added bytes before any read/copy.
+    std::fill(filled.begin() + 8, filled.end(), uint8_t(0xa5));
+    CHECK(std::all_of(filled.begin(), filled.end(), [](uint8_t b) { return b == 0xa5; }));
+    const Bytes good = frame(session());
+    Bytes scratch(good.size() + 16);
+    std::copy(good.begin(), good.end(), scratch.begin());
+    std::fill(scratch.begin() + good.size(), scratch.end(), uint8_t(0xa5));
+    const auto *allocation = scratch.data();
+    Bytes moved = std::move(scratch);
+    CHECK(moved.data() == allocation);
+    auto validator = CodecValidator::Create(session()); CHECK(validator);
+    auto result = validator->ValidateOwned(std::move(moved), good.size(), envelope());
+    CHECK(result && result->bytes().data() == allocation);
+    CHECK(result->payloadSize() == good.size());
+    CHECK(std::equal(good.begin(), good.end(), result->bytes().begin()));
+    CHECK(std::all_of(result->bytes().begin() + good.size(), result->bytes().end(),
+        [](uint8_t b) { return b == 0; }));
 }
 
 static void testOwnedTransferAndCache()
@@ -292,7 +315,7 @@ static void testPayloadAndGeometry()
     signs.resize(20, 0xff); put32(signs, 0, 1 | (5u << 16) | (3u << 28));
     std::fill(signs.begin() + 11, signs.begin() + 19, 0xff);
     CHECK(!validate(frame(s, signs))); // 8 plane bytes, 64 signs: needs 28 bytes.
-    Bytes excess = record(); excess.resize(20); put32(excess, 0, 1 | (5u << 16) | (3u << 28));
+    Bytes excess = record(); excess.resize(20, 0); put32(excess, 0, 1 | (5u << 16) | (3u << 28));
     CHECK(!validate(frame(s, excess)));
     Bytes ambiguous = record(); ambiguous[8] = 0; ambiguous[10] = 1;
     CHECK(!validate(frame(s, ambiguous)));
@@ -341,6 +364,7 @@ static void testPooledSignsAndPlanes()
 
 int main()
 {
+    testOverwriteBytes();
     testOwnedTransferAndCache();
     testOwnedBounds();
     testValidAndOwnership();

@@ -228,7 +228,7 @@ bool scanRecords(const uint8_t *input, size_t length,
 }
 } // namespace
 
-ValidatedCodecFrame::ValidatedCodecFrame(std::vector<uint8_t> &&bytes,
+ValidatedCodecFrame::ValidatedCodecFrame(CodecBytes &&bytes,
     std::vector<uint32_t> &&offsets, const CodecSession &session,
     const MLPyrowaveFrameInfo &info)
     : bytes_(std::move(bytes)), offsets_(std::move(offsets)), session_(session), info_(info)
@@ -271,7 +271,7 @@ bool CodecValidator::Validate(const uint8_t *input, size_t length, size_t storag
 }
 
 std::unique_ptr<const ValidatedCodecFrame> CodecValidator::ValidateOwned(
-    std::vector<uint8_t> &&bytes, size_t payloadLength, const MLPyrowaveFrameInfo &info) const
+    CodecBytes &&bytes, size_t payloadLength, const MLPyrowaveFrameInfo &info) const
 {
     try {
         if (payloadLength < 8 || payloadLength > InputLimit ||
@@ -299,8 +299,9 @@ std::unique_ptr<const ValidatedCodecFrame> ValidateCodecFrame(
         if (!validator || !validator->Validate(input, length, length + 16, info, offsets))
             return nullptr;
         // Only a completely validated transaction earns an owned input copy.
-        std::vector<uint8_t> bytes(length + 16, 0);
+        CodecBytes bytes(length + 16);
         std::memcpy(bytes.data(), input, length);
+        std::fill(bytes.begin() + length, bytes.end(), uint8_t(0));
         return std::unique_ptr<const ValidatedCodecFrame>(new ValidatedCodecFrame(
             std::move(bytes), std::move(offsets), session, info));
     } catch (const std::bad_alloc &) {
