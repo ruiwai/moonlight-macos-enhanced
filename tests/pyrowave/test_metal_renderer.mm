@@ -18,6 +18,36 @@
 static uint64_t clockNow(void *) { return 100; }
 static MLPyrowaveConfiguration config() { return {128, 128, 256, 0, 0, 1}; }
 static NSError *sentinel() { return [NSError errorWithDomain:@"previous" code:99 userInfo:nil]; }
+static void cpuDrawableTests()
+{
+    const uint32_t cases[][6] = {
+        {1280,720,3840,2160,1280,720}, {1280,720,5120,2880,1280,720},
+        {1280,720,1280,720,1280,720}, {1280,720,1080,1920,405,720},
+        {1280,720,2560,1600,1152,720}, {1280,720,3,2,3,2},
+        {3,2,8,5,3,1}, {2,2,1,1,1,1}, {16384,16384,16384,16384,16384,16384}
+    };
+    for (unsigned resize = 0; resize < 8; ++resize) for (unsigned i = 0; i < 9; ++i) {
+        const auto &c = cases[resize % 2 ? 8 - i : i]; // Repeated back-and-forth resize.
+        uint32_t w = 99, h = 99;
+        CHECK(MLPyrowaveSelectDrawableSize(c[0], c[1], c[2], c[3], &w, &h));
+        CHECK(w == c[4] && h == c[5]);
+        CHECK(w <= c[0] && h <= c[1] && w <= c[2] && h <= c[3]);
+        const long double scale = std::min({1.0L, (long double)c[0]/c[2], (long double)c[1]/c[3]});
+        CHECK(std::fabs(w - c[2]*scale) < 1 && std::fabs(h - c[3]*scale) < 1);
+    }
+    for (unsigned axis = 0; axis < 4; ++axis) for (uint32_t bad : {0u, 16385u, UINT32_MAX}) {
+        uint32_t c[] = {1280,720,3840,2160}, w = 99, h = 99; c[axis] = bad;
+        CHECK(!MLPyrowaveSelectDrawableSize(c[0], c[1], c[2], c[3], &w, &h) && !w && !h);
+    }
+    uint32_t w = 99, h = 99;
+    CHECK(!MLPyrowaveSelectDrawableSize(1,1,1,1,nullptr,&h) && !h);
+    CHECK(!MLPyrowaveSelectDrawableSize(1,1,1,1,&w,nullptr) && !w);
+    CHECK(!MLPyrowaveSelectDrawableSize(1,1,1,1,nullptr,nullptr));
+    for (const auto &c : {std::array<uint32_t,4>{1,1,16384,1}, {1,1,1,16384}}) {
+        w = h = 99;
+        CHECK(!MLPyrowaveSelectDrawableSize(c[0],c[1],c[2],c[3],&w,&h) && !w && !h);
+    }
+}
 static void invalid(MLPyrowaveConfiguration c, MLPyrowaveClock clock, NSString *reason)
 {
     NSError *error = sentinel();
@@ -242,6 +272,7 @@ static void hardwareTests(id<MTLCommandQueue> queue, MLPyrowaveConfiguration c)
 int main()
 {
     @autoreleasepool {
+        cpuDrawableTests();
         cpuFactoryTests();
         id<MTLDevice> device = MTLCreateSystemDefaultDevice(); // Standalone test ONLY.
         bool supported = false;

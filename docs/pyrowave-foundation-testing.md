@@ -20,10 +20,12 @@
 
 ## Start small and observe the actual selection
 
-1. Start with SDR **1280x720**, windowed, with a small client output/backing size.
-   The fixed **256 MiB** session cap includes two drawables, not just decoder
-   textures. Retina/4K backing can fail preflight even for a small encoded stream,
-   resulting in an initial H.264 fallback; reduce the actual window/backing size.
+1. Start with SDR **1280x720**. The drawable canvas is aspect-preserving and
+   bounded by both source and backing dimensions; Retina/4K backing alone no
+   longer charges a full-4K canvas. The compositor scales the canvas to the window.
+   Preflight/setup reserve two maximum source-size canvases within the unchanged
+   **256 MiB** session cap; high-resolution sources can still fail. Geometry is
+   not memory proof. Resizing neither recreates the decoder nor raises the budget.
 2. In Video settings choose **PyroWave (Experimental)** (stored index 3).
    Indices 0 H.264, 1 H.265 and 2 AV1, and default H.264, remain unchanged;
    there is no codec Auto option and nothing implicitly opts into PyroWave.
@@ -39,7 +41,8 @@
    A capable client can still get initial H.264 when the host lacks the contract.
    The saved preference is not rewritten and there is no midstream codec switch.
 5. Record client/host revisions, deployed host build/runtime and capture details,
-   resolution/FPS, actual backing size, negotiated codec and offer/fallback logs.
+   resolution/FPS, source/backing/drawable setup log, negotiated codec and exact
+   offer/fallback/setup failure reasons (do not infer a budget cause from fallback).
    Report visual corruption, color errors, stalls, memory issues and stop/restart
    behavior separately. Do not infer PyroWave performance from H.264 fallback:
    the ordinary legacy risk assessment is deliberately skipped for index 3.

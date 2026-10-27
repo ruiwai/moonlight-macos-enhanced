@@ -26,6 +26,8 @@ NS_ASSUME_NONNULL_BEGIN
 // Estimates TWO private BGRA8 render-target drawables plus decoder charge.
 // No allocation/submission; excludes caller's other resources/driver caches,
 // not process RSS. Runtime also checks two actual allocatedSize charges.
+// App reserves the maximum source-size canvas; bounded resize geometry alone
+// is not a memory proof and never raises the shared 256 MiB cap.
 - (BOOL)canPresentWidth:(NSUInteger)width height:(NSUInteger)height;
 // Synchronous borrowed public Common descriptor; returns Common CPU ack ONLY,
 // not GPU/presentation success. Independent coordinator thread-safety.

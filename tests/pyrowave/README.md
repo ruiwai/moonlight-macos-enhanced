@@ -282,3 +282,8 @@ Test-only same-queue blit checks gray within two codes of R8=128 and black lette
 foreign-device checks need a second device. Uniform frames do NOT verify siting,
 nonzero coefficients, encoder pixel correctness or Metal validation.
 UI/drawable and Busy timing untested; offscreen shares pass. Explicit opt-in is experimental, not proven GPU correctness or interoperability.
+The app bounds the drawable canvas to both source and backing dimensions (no
+upscale); the compositor scales it to the window. Preflight/setup reserve two
+maximum source-size canvases, not full Retina backing. The 256 MiB cap is unchanged
+and high-resolution sources can still fail. CPU selector cases precede the GPU
+probe; geometry checks do not establish allocation or native UI correctness.
