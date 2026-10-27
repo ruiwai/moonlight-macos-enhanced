@@ -597,7 +597,7 @@ static BOOL MLSyncMenuItems(NSMenu *menu, NSArray<NSDictionary<NSString *, id> *
     if (![self isWindowFullscreen] && ![self isWindowBorderlessMode]) {
         return NO;
     }
-    if ([self isWindowFullscreen] && self.hideFullscreenControlBall) {
+    if (self.hideFullscreenControlBall) {
         return NO;
     }
     return YES;
