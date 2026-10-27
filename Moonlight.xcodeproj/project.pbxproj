@@ -140,6 +140,7 @@
 				Stream/PyroWave/MLPyrowaveCoordinator.mm,
 				Stream/PyroWave/MLPyrowaveMetalKernels.mm,
 				Stream/PyroWave/MLPyrowaveMetalDecoder.mm,
+				Stream/PyroWave/MLPyrowaveMetalRenderer.mm,
 				Limelight.xcdatamodeld,
 				macOS/AppCell.xib,
 				macOS/AppDelegateForAppKit.m,

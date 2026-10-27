@@ -242,3 +242,27 @@ Presentation blits all three correctly shaped R8Unorm planes to a shared buffer 
 256-byte rows; it never retains planes/command buffers or reenters decoder controls.
 This is synthetic dispatch/lifetime smoke, NOT pixel correctness, Metal validation,
 real encoder conformance, deterministic Busy coverage, streaming or feature readiness.
+
+## Standalone SDR Metal renderer (not live enablement)
+`MLPyrowaveMetalRenderer` is an opt-in peer consuming public coordinator packets,
+on the supplied existing renderer queue/device only; no settings/Connection or
+VideoDecoderRenderer wiring. Fixed session, permanent stop, one pending + one
+render-local owner; decoder Busy drops the consumed frame without retaining a retry.
+Nil/invalid targets preserve pending. BGRA8Unorm only, aspect-fit full-target black clear.
+Non-memoryless storage (stored result required). Fractional viewport; texture-bounded
+inward scissor uses ceil(left/top), floor(right/bottom); empty fit preserves pending.
+BT.709 full/limited range and center/left chroma; no sRGB/gamma transform. Caller
+layer MUST use `kCGColorSpaceITUR_709` with SDR/EDR off. Caller accounts external
+targets within the existing 256 MiB session budget and cannot reuse/read them
+until completion; command-buffer references retain resources. Decoder alone commits.
+Clock/context must outlive the renderer and be thread-safe/nonreentrant.
+The 3-minute strict C++14 ARC Werror ASan/UBSan step links actual sources and explicit
+existing C/C++ objects with Foundation/Metal/QuartzCore. CPU-invalid checks
+precede hardware detection; unsupported hardware visibly returns 77.
+Supported failures abort. Common serialization feeds valid header-only zero-count
+frames (padded B16/N1/XOR), repeats increasing IDs in all range/siting
+configs, checks invalid-target pending preservation, bounded completion and stop.
+Test-only same-queue blit checks gray within two codes of R8=128 and black letterbox;
+foreign-device checks need a second device. Uniform frames do NOT verify siting,
+nonzero coefficients, encoder pixel correctness or Metal validation.
+UI/drawable and Busy timing untested; offscreen shares pass. Still disabled.

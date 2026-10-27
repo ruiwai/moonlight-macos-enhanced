@@ -177,6 +177,40 @@ jobs:
             fi
           fi
 
+      - name: Compile and run standalone Metal renderer offscreen smoke
+        timeout-minutes: 3
+        env:
+          ASAN_OPTIONS: halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          common=moonlight-common/moonlight-common-c/src
+          native=Limelight/Stream/PyroWave
+          flags=(-std=c++14 -fobjc-arc -Wall -Wextra -Werror -g -O1
+                 '-fsanitize=address,undefined' -fno-omit-frame-pointer)
+          objects=("$RUNNER_TEMP/MLPyrowaveCodec-coordinator.o"
+                   "$RUNNER_TEMP/MLPyrowaveReceiver-coordinator.o"
+                   "$RUNNER_TEMP/PyrowaveProtocol-pipeline.o"
+                   "$RUNNER_TEMP/PyrowaveReassembly-pipeline.o"
+                   "$RUNNER_TEMP/MLPyrowaveMetadata-pipeline.o"
+                   "$RUNNER_TEMP/MLPyrowaveReassembly-pipeline.o")
+          xcrun clang++ "${flags[@]}" -I "$common" -I "$native" \
+            "$native/MLPyrowaveMetalRenderer.mm" "$native/MLPyrowaveMetalDecoder.mm" \
+            "$native/MLPyrowaveMetalKernels.mm" "$native/MLPyrowaveCoordinator.mm" \
+            tests/pyrowave/test_metal_renderer.mm "${objects[@]}" \
+            -framework Foundation -framework Metal -framework QuartzCore \
+            -o "$RUNNER_TEMP/pyrowave-metal-renderer-tests"
+          if "$RUNNER_TEMP/pyrowave-metal-renderer-tests"; then
+            echo 'Metal renderer offscreen zero-frame/range/letterbox smoke passed; NOT full encoder pixel correctness or drawable/UI presentation' >> "$GITHUB_STEP_SUMMARY"
+          else
+            status=$?
+            if [ "$status" -eq 77 ]; then
+              echo '::notice::Metal renderer hardware smoke SKIPPED (77): macOS 13/Apple7 device unavailable; CPU factory checks passed'
+              echo 'Metal renderer hardware smoke SKIPPED (77); CPU factory checks passed; no GPU rendering result' >> "$GITHUB_STEP_SUMMARY"
+            else
+              exit "$status"
+            fi
+          fi
+
       - name: Checkout pinned CPU packetizer oracle
         uses: actions/checkout@v6
         with:
