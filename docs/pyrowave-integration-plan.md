@@ -2,8 +2,10 @@
 
 ## Status, pins and scope
 
-Common raw bridge version 2 at `9af0c8c` retains SDR negotiation introduced at `e26d480`; app selection/preflight, coordinator, Metal and presentation remain planned/unwired.
-Parent app baseline: `6e97b2feac3e56b296299c1006018a69bbb713e2`; Native Common repin: `9af0c8cc9be21afce5c735c7876ba03884f7d84c` (new-pin parent CI pending).
+Common raw bridge version 2 at `9af0c8c` retains SDR negotiation introduced at `e26d480`; standalone coordinator/Metal components exist, but app selection/preflight and live coordinator/Metal/presentation wiring remain absent.
+Native Common pin: `9af0c8cc9be21afce5c735c7876ba03884f7d84c`. Historical parent `f1c45a8` app [run 40481438739](https://github.com/ruiwai/moonlight-macos-enhanced/actions/runs/40481438739) passed.
+That app log contains all eight native PyroWave `CompileC` units once each, plus Common `PyrowaveProtocol.c` / `PyrowaveReassembly.c` once each; no PBX edits were needed.
+Successful compilation/linking does not establish class/symbol retention under dead stripping, live wiring, or readiness; retention remains unknown.
 Common remains the public `https://github.com/ruiwai/moonlight-common-c.git`; do not swap in Foundation Common (different streaming API/ABI).
 Wire contract: protocol **2**, bitstream **2**, payload **3**; exact encoder reference: `cc91cbf6363721d19d135d05ca8e3d8665ea6afd`.
 Initial scope: supported Apple Silicon, SDR BT.709, 8-bit 4:2:0, negotiated range/siting; FP32 arithmetic **and storage**. HDR/444/10-bit and FP16 are deferred.
@@ -61,7 +63,9 @@ Snapshots protect lifetime, not admission: publication must serialize with stop 
 
 `Common/src/VideoStream.c` now bypasses the encrypted pre-auth frame filter for PyroWave: authenticate first, then require app full-ID/replay validation; AES-GCM and timeout behavior are unchanged.
 Watchdog result routing and the filter helper are implemented and synthetically tested at `9af0c8c`, not live encrypted/network validation.
-Actual callback → owned recovery/TLV/codec/deadline validator composition and live encrypted reorder/wrap/replay/watchdog coverage remain required before enabling.
+The new non-GPU `test_common_coordinator.mm` composes actual Common queue/depacketizer → coordinator → watchdog with synthetic PYRF; macOS execution is pending.
+It includes direct deterministic timing and actual `RtpvAddPacket`/`LiGetMicroseconds` timing, owned recovery/TLV/codec gating, replay/stop/expiry and opposite-TLS isolation.
+This gate is not live app wiring: encrypted network reorder/wrap/replay/watchdog coverage, actual-device integration and enablement qualification remain required.
 
 ## PROPOSED coordinator: synchronous CPU boundary, bounded GPU admission
 

@@ -4,8 +4,8 @@ The [workflow](../../.github/workflows/pyrowave-prerequisites.yml) compiles and
 runs the existing Common protocol/reassembly goldens and standalone native
 metadata validation and strict reassembly adapter tests on `macos-15`.
 It runs on pushes to `pyrowave/**`, pull requests targeting `master` or `main`,
-and manual dispatch. Only the native Common gitlink is initialized; nested
-submodules and the application build are not needed.
+and manual dispatch. Only the native Common gitlink and its pinned `enet` nested
+dependency are initialized; no application build or other nested dependency is needed.
 
 ## Dependency boundary
 
@@ -24,13 +24,13 @@ Common now requires descriptor version 2 (rejecting v1) with full outer frame ID
 and receive/presentation microseconds; received payload/descriptor are borrowed synchronously until callback return.
 Common frees the packet; copy anything retained, never free borrowed storage or synchronously stop/destroy Common. Context survives stop through joins/cleanup; submissions may follow stop, never cleanup.
 `submit` returns `int`: only `LI_PYROWAVE_PACKET_VALIDATED_FRAME` after synchronous owned complete PYRF recovery, protected TLV/codec and local-deadline validation satisfies the first-full-frame watchdog. Partial/malformed/expired/replayed input returns `LI_PYROWAVE_PACKET_IGNORED`; ignored/unknown results do not acknowledge a frame. This is not GPU/presentation success.
-PyroWave bypasses the encrypted pre-auth frame filter: authenticate first, then require app full-ID/replay validation; AES-GCM and timeouts are unchanged. Watchdog result routing/filter helper are synthetically tested, not live encrypted/network receive or actual owned validator composition.
+PyroWave bypasses the encrypted pre-auth frame filter: authenticate first, then require app full-ID/replay validation; AES-GCM and timeouts are unchanged. Watchdog routing/filter helper tests are synthetic; the new owned-validator composition gate below awaits macOS execution, not live encrypted/network evidence.
 No app callback, app selection/preflight, Metal or presentation enablement is added.
 [`PyrowavePacketCallbackTest.c`](../../moonlight-common/moonlight-common-c/tests/PyrowavePacketCallbackTest.c) links actual Common
 [`RtpVideoQueue.c`](../../moonlight-common/moonlight-common-c/src/RtpVideoQueue.c) / [`VideoDepacketizer.c`](../../moonlight-common/moonlight-common-c/src/VideoDepacketizer.c), checking exact identity/timing and selected-path gates.
 Its arbitrary synthetic payload is not real codec data or validator composition.
 [Public Common run 40390473131](https://github.com/ruiwai/moonlight-common-c/actions/runs/40390473131) passed one ASan/UBSan CTest on `macos-15` at historical pin `65f43ca`, after initial fixture UB was fixed.
-Parent app build at the current pin is pending; this does not establish live interoperability or readiness.
+Parent `f1c45a8` app build passed (run 40481438739); this does not establish live interoperability or readiness.
 At exact Common `9af0c8cc9be21afce5c735c7876ba03884f7d84c`, [run 40403395078](https://github.com/ruiwai/moonlight-common-c/actions/runs/40403395078) passed both callback + negotiation CTests with fatal ASan/UBSan (`/tmp/pyrowave-9af0c8c-reviewed.log:249-258`). Live encrypted/network and actual callback → owned recovery/TLV/codec/deadline validator composition remain required.
 
 ## What CI checks
@@ -225,8 +225,21 @@ Historical `5303fde`: attempt 1 had no runner; attempt 2 callback passed, negoti
 Tests link actual Common helpers/serializer with synthetic inputs, not network RTSP.
 The two production units have explicit Common Xcode membership; Apple-only tests
 are not app sources; no PBX change is needed for this repin. Historical `a8a647d`
-CI was all green with `65f43ca`; parent baseline `6e97b2f` subsequently passed all three workflows (PyroWave, Input 12/12 CTests, macOS app build/draft), compiling both Common units once (`/tmp/pyrowave-6e97b2f-404017*-reviewed.log`). New-pin parent CI remains pending. The app still cannot opt in: no actual callback or active
+CI was all green with `65f43ca`; parent baseline `6e97b2f` subsequently passed all three workflows (PyroWave, Input 12/12 CTests, macOS app build/draft), compiling both Common units once (`/tmp/pyrowave-6e97b2f-404017*-reviewed.log`). At `f1c45a8`, app run 40481438739 passed with the current Common pin. The app still cannot opt in: no actual callback or active
 coordinator, actual-device preflight, Metal decoding or presentation integration.
+
+## Actual Common → coordinator → watchdog CPU gate (execution pending)
+
+`test_common_coordinator.mm` and its opaque C transport helper link the full Common
+Debug dylib, not mocked transport or duplicate standalone Common helper objects.
+CI builds only pinned `enet`, discovers installed `openssl@3` with Homebrew, and
+runs the two Common callback/negotiation CTests plus this fatal-ASan/UBSan target.
+ASan shadow checks confirm Common freed source envelopes before return; retained
+frames preserve bytes after teardown. Synthetic PYRF/XOR covers full identity/timing/latency,
+partial/malformed/codec/expiry/replay/stop rejection and opposite-TLS isolation.
+Direct depacketizer times are deterministic; actual `RtpvAddPacket` uses the same
+`LiGetMicroseconds` clock as the coordinator. Watchdog reset is observation only.
+No GPU skip path, encrypted network, sockets, live app wiring or enablement claim.
 
 ## Metal decoder synthetic smoke
 
