@@ -22,8 +22,14 @@ static id<MTLComputePipelineState> Pipeline(id<MTLDevice> device, id<MTLLibrary>
         ? [library newFunctionWithName:name constantValues:constants error:&cause]
         : [library newFunctionWithName:name];
     if (!function) return Fail(error, MLPyrowaveMetalErrorPipeline, name, cause);
+    MTLComputePipelineDescriptor *descriptor = [MTLComputePipelineDescriptor new];
+    if (!descriptor) return Fail(error, MLPyrowaveMetalErrorPipeline, name);
+    descriptor.computeFunction = function;
+    descriptor.maxTotalThreadsPerThreadgroup = threads;
+    descriptor.threadGroupSizeIsMultipleOfThreadExecutionWidth = requireSIMD32;
     id<MTLComputePipelineState> pipeline =
-        [device newComputePipelineStateWithFunction:function error:&cause];
+        [device newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionNone
+                                          reflection:nil error:&cause];
     if (!pipeline) return Fail(error, MLPyrowaveMetalErrorPipeline, name, cause);
     if (pipeline.device != device || pipeline.maxTotalThreadsPerThreadgroup < threads ||
         (requireSIMD32 && pipeline.threadExecutionWidth != 32) ||

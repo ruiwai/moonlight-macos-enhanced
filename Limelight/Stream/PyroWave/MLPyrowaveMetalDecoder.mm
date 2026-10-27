@@ -275,7 +275,9 @@ bool ValidInput(MLPyrowaveMetalPool *p, MLPyrowaveFrame *frame)
 }
 bool EncodeDequant(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
 {
-    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial];
+    // Dispatches write disjoint component slices/mips; input buffers are read-only.
+    // The encoder boundary and tracked heap resources preserve the dequant -> IDWT dependency.
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
     if (!enc) return false;
     enc.label = @"PyroWave dequant";
     [enc setComputePipelineState:p->kernels.dequant];

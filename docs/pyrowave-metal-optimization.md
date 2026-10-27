@@ -19,7 +19,8 @@ only so far; standalone draw-gate C11/C++14 checks passed with ASan/UBSan.
 - Dequant batches independent bands per component/level using grid.z=3 (levels
   0..3) or 4 (level 4): 42 dispatches become 13. IDWT remains 13 dispatches with
   cached pipeline bindings/shared push bytes once per level. FP32 and barriers
-  remain; fewer CPU encode calls are not proof of lower GPU time.
+  remain; dequant now uses a concurrent encoder, pending GPU/benchmark acceptance.
+  Fewer CPU encode calls are not proof of lower GPU time.
 - Receive parsing and main-thread drawable acquisition/encoding run outside the
   app `_decodeSubmitLock`; short state snapshots and epoch/peer checks guard
   results. Coordinator receive/stop serialization remains. A try-take collision
@@ -81,7 +82,7 @@ No measurements were collected here.
 | --- | --- |
 | Existing CI | All existing Common protocol/reassembly/negotiation, metadata, codec/packetizer, receiver/composition/coordinator, stats/draw-gate and Metal kernel/decoder/renderer checks remain required, plus the app build. Fatal sanitizer/strict-warning policy stays. |
 | Kernel cache assertions | CI-only same-device object identity/error clearing, nil rejection after hit and cache survival. Unsupported GPU exit 77 is a skip, never a pass. No current execution claim. |
-| Batch equivalence | Synthetic per-band vs batched dequant bytewise comparisons include nonzero/sparse records, 3/4 bands and edge geometry; same shader on both sides is not independent numerical proof. |
+| Scheduling equivalence | Three synthetic dequant strategies (serial per-band, serial batched, concurrent per-band via disjoint single-slice aliased views) compare bytewise across 12 cases; the same shader is not independent numerical/IDWT proof. |
 | Numerical/pixel acceptance | Existing sparse/zero dispatch smoke and batching checks are **not** a full nonzero IDWT oracle. Full real-encoder nonzero corpus with independent reference planes, edges/aprons, quantization, chroma and agreed numeric bounds is prerequisite for FP16, fusion or hand-tuned SIMD. |
 | Lifetime/live/performance | Metal validation, stop/resize/control races, final-reader lifetime, live encrypted transport/color/presentation and matched hardware profiling remain separate gates; CI smoke does not prove them. |
 
@@ -98,3 +99,91 @@ No measurements were collected here.
   chroma behavior against independent references before profiling acceptance.
 - Precompiled metallib: future packaging/version/device validation work; the
   one-entry in-process cache is not a precompiled or disk library cache.
+
+## Apple Silicon follow-up audit (2026-10-27)
+
+Active scope is native `Limelight/Stream/PyroWave`, not Qt/MoltenVK. This audit
+records static source findings and ranked experiments, not a new architecture.
+
+### Implemented, pending GPU verification
+
+`MLPyrowaveMetalKernels.mm`'s `Pipeline` uses compute descriptors with
+`maxTotalThreadsPerThreadgroup` of 128 for dequant and 64 for both IDWT variants;
+only dequant promises `threadGroupSizeIsMultipleOfThreadExecutionWidth`.
+This enables tighter compiler register/resource budgeting, not guaranteed
+occupancy or speed. FP32 and fastMath=NO remain unchanged.
+
+`MLPyrowaveMetalShaders.h` routes a uniform zero ballot (absent or coded-zero)
+to early zero writes, avoiding scans, barriers and sign loads. The sentinel
+ternary does not dereference UINT32_MAX. Zero stores are still required for
+reused textures; this is not permission to leave stale coefficients unwritten.
+`tests/pyrowave/test_metal_decoder.mm` now covers 12 synthetic combinations:
+3/4 bands x 4x4/65x33 x mixed/absent/coded-zero. Zero cases require exact +0,
+with poisoned unused record bytes in coded-zero fixtures. Existing nonzero
+comparisons use the same pipeline, not an independent numerical reference.
+All 12 cases compare three independently initialized/read-back outputs: serial
+per-band, serial batched and concurrent per-band using disjoint aliased array views.
+This exercises same-shader scheduling equivalence, not the actual pooled pyramid's
+mip/slice hazards; that layout still requires GPU execution and Metal validation.
+Evidence is static inspection only: no local CI-only GPU tests were run and
+no performance gain was measured.
+
+### Ranked next experiments
+
+Priorities are provisional until a matched hardware trace identifies bottlenecks.
+All filenames below refer to the native path above unless explicitly qualified.
+
+1. **CPU receive allocator/copy cost.** `MLPyrowaveReassembly.c`'s Push saves each
+   packet with malloc+memcpy for exact duplicate validation, in addition to Common
+   reassembly storage (`moonlight-common/moonlight-common-c/src/PyrowaveReassembly.c`).
+   `MLPyrowaveReceiver.cpp` constructs a value-initialized payload+16-byte vector;
+   CopyFrame overwrites its payload, then ValidateOwned validates and moves it.
+   `MLPyrowaveMetalDecoder.mm` submit memcpy's into shared storage and converts
+   byte offsets to word offsets again. A bounded persistent arena/direct-to-shared
+   validated-ownership experiment could eliminate work. Preserve byte-identical
+   and conflicting duplicate semantics, initialized guards, expiry/replay,
+   immutable frames and last-GPU-reader lifetime. Never substitute a collision-
+   prone hash for duplicate byte checks, skip validation, or overwrite an in-flight
+   upload. Upper-bound illustration only: 16 MiB * 120 fps * 2 (read+write) =
+   3.75 GiB/s CPU traffic for one upload copy; not a workload measurement, and
+   excluding other copies and cache effects.
+2. **GPU dequant concurrency validation/benchmark.** EncodeDequant now issues 13
+   concurrent dispatches writing disjoint component slices/mips with read-only
+   input buffers. The unchanged encoder boundary and tracked heap resources
+   preserve dequant-to-IDWT ordering; IDWT stays serial with texture barriers.
+   IDWT LL writes overlap dequant subresources across levels: keep tracking and
+   barriers. Actual pooled-pyramid Metal validation and matched profiling remain
+   pending; no measured speedup. Further grouping needs a resource/layout contract.
+3. **IDWT resource/bandwidth cost.** The FP32 pyramid feeds 13 IDWT dispatches,
+   each with 64 threads and a 20x41 float2 shared tile: 6560 bytes before compiler
+   padding. Measure occupancy, register spills, gather throughput and barrier
+   stalls. SIMD32 specialization of the dequant scan fallback and IDWT shuffle/
+   retile are candidates, not assumed wins; the compiler may already eliminate
+   branches. Preserve apron, mirror and transposition behavior. R16Float
+   intermediate storage could halve nominal coefficient storage versus R32Float,
+   not total memory or GPU time. Require independent nonzero reference planes,
+   quantization, edge and chroma error gates first; do not blindly flip half or
+   fastMath.
+4. **In-flight overlap.** The single pool stays busy through decode+render command
+   completion. Two bounded leased slots could overlap CPU upload and GPU work,
+   but require redesign of the 512 MiB memory budget and latency/drop policy.
+   Preserve latest-pending behavior and final-reader lifetime; no unbounded queue.
+   An extra slot could worsen latency. Source cadence and busy/expired counts
+   must distinguish this bottleneck from insufficient input or deadline drops.
+5. **Setup only.** The compute cache exists, but the renderer factory still
+   compiles vertex/fragment functions and its render pipeline. Profile actual-
+   renderer preflight/setup temporary allocation separately. A precompiled
+   metallib or device-keyed render cache could reduce setup, not steady-state
+   work. No blanket -Ofast/-mcpu=native or NEON rewrite of libc memcpy: shader
+   optimization is independent of CPU flags. Retain deployment compatibility
+   and runtime device checks.
+
+### Compact acceptance plan
+
+Use a matched arm64 Mac, OS/build and workload, covering dense+sparse inputs and
+edge dimensions. Require Metal validation and existing CI GPU checks (exit 77
+is a skip, never a pass); require an independent nonzero corpus before math or
+layout changes. Follow the [profiling contract](#profiling-contract) and baseline
+above: trace-off p50/p95/p99 CPU receive/upload/encode, GPU and actual-display
+latency, plus drops, memory and thermal state; separate setup and trace overhead.
+No runtime verification or performance claim is made by this documentation edit.

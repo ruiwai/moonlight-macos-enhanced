@@ -282,8 +282,11 @@ real encoder conformance, deterministic Busy coverage, streaming or feature read
 
 Dequant batches bands with grid.z=3/4 per component/level: 42 dispatches become 13;
 IDWT remains 13, caches pipeline bindings and sets shared push bytes once per level.
-Synthetic bytewise per-band/batched dequant comparisons cover sparse/nonzero inputs,
-3/4 bands and 4x4/65x33 geometry, not a full nonzero IDWT/real-encoder pixel oracle.
+Synthetic bytewise dequant comparisons cover three strategies: serial per-band,
+serial batched and concurrent per-band via disjoint single-slice aliased array views.
+All 12 cases span 3/4 bands x 4x4/65x33 x mixed/absent/coded-zero, including poisoned
+unused bytes and exact +0 checks. CI-only execution is pending; this is same-shader
+scheduling equivalence, not independent numerical/IDWT or real-encoder pixel proof.
 
 `test_metal_kernels.mm` additionally checks same-device bundle identity, stale-error
 clearing and nil rejection after a hit without evicting the last good cache entry.

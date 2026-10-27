@@ -615,7 +615,10 @@ kernel void pyrowave_wavelet_dequant(const device void* spvBufferAliasSet0Bindin
     coord += (int2(8) * int2(int(block_x), int(block_y)));
     coord += local_coord;
     uint offset_u32 = payload_offsets.data[block_index_32x32];
-    if (offset_u32 == 4294967295u)
+    // Uniform per threadgroup; never dereference the UINT32_MAX sentinel.
+    uint ballot = offset_u32 == 4294967295u ? 0u : payload_data_u32.data[offset_u32] & 65535u;
+    // Coded zero ballots avoid scans/barriers/sign loads, but still require zero stores.
+    if (ballot == 0u)
     {
         for (int j = 0; j < 2; j++)
         {
@@ -627,7 +630,6 @@ kernel void pyrowave_wavelet_dequant(const device void* spvBufferAliasSet0Bindin
         }
         return;
     }
-    uint ballot = payload_data_u32.data[offset_u32] & 65535u;
     uint q_code = payload_data_u32.data[offset_u32 + 1u] & 255u;
     if (local_index < 16u)
     {

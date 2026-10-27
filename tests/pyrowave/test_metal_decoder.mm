@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Synthetic coordinator fixture smoke, NOT encoder conformance/pixel correctness.
+// Synthetic coordinator smoke + analytic-zero dequant oracle, NOT encoder/full pixel correctness.
 #import "MLPyrowaveMetalDecoder.h"
 #include "MLPyrowavePresentationBudget.h"
 #include "MLPyrowaveReceiver.hpp"
@@ -142,7 +142,8 @@ static MLPyrowaveMetalDecoder *create(MLPyrowaveMetalKernels *k, id<MTLCommandQu
     CHECK(c.range == 0 && c.siting == 0 && c.generation == 1);
     return decoder;
 }
-// Batching equivalence only: same dequant pipeline, NOT encoder/IDWT goldens.
+// Mixed inputs: synthetic same-shader scheduling equivalence. Absent/coded-zero: analytic-zero oracle.
+// Neither is independent nonzero IDWT proof or an encoder golden.
 static void finishGPU(id<MTLCommandBuffer> cmd)
 {
     CHECK(cmd);
@@ -153,8 +154,9 @@ static void finishGPU(id<MTLCommandBuffer> cmd)
     CHECK(cmd.status == MTLCommandBufferStatusCompleted && !cmd.error);
 }
 static void dequantBatchCase(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q,
-    NSUInteger width, NSUInteger height, unsigned bandCount, bool sparseOnly)
+    NSUInteger width, NSUInteger height, unsigned bandCount, unsigned fixtureMode)
 {
+    // Fixture modes: 0 = original mixed, 1 = absent, 2 = coded-zero with poisoned unused bytes.
     struct Push { int32_t resolution[2], outputLayer, blockOffset, blockStride, blockLayerStride; };
     static_assert(sizeof(Push) == 24, "Dequant ABI including former padding");
     const unsigned firstBand = 4 - bandCount, base = 3;
@@ -171,13 +173,19 @@ static void dequantBatchCase(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q,
     auto *bytes = static_cast<uint8_t *>(input.contents);
     for (unsigned b = 0; b < bandCount; ++b) {
         for (unsigned block = 0; block < layerStride; ++block) {
-            if (sparseOnly || ((b + block) % 3 == 1 && block != layerStride - 1)) continue;
+            if (fixtureMode == 1 || (fixtureMode == 0 &&
+                ((b + block) % 3 == 1 && block != layerStride - 1))) continue;
             // The 16-byte record after makeFrame's 8-byte sequence header; not a GPU encoder fixture.
             std::array<uint8_t, 16> record = {{1, 0, 4, 0x50, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0}};
             record[4] = uint8_t(8 * (b + 1) + block); // Distinct band/block quantization.
             record[8] = 1; record[9] = 0; // Ballot bit 0: first group has one bitplane.
             record[10] = 0; record[11] = 3; // q_bits=0, scale=0; two nonzero coefficients.
             record[12] = 1; // First coefficient negative, second positive; independent sign data.
+            if (fixtureMode == 2) {
+                record.fill(0xa5); // Unused control/planes/signs must not affect the zero result.
+                record[0] = record[1] = 0; // Valid record offset, zero low 16-bit ballot.
+                record[4] = uint8_t(8 * (b + 1) + block); // Existing legal quantization.
+            }
             const unsigned byteOffset = 8 + 16 * (records - 1 - (b * layerStride + block));
             std::memcpy(bytes + byteOffset, record.data(), record.size());
             table[base + b * layerStride + block] = byteOffset / 4; // Shader offsets are words.
@@ -187,46 +195,57 @@ static void dequantBatchCase(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q,
     desc.textureType = MTLTextureType2DArray; desc.pixelFormat = MTLPixelFormatR32Float;
     desc.width = width; desc.height = height; desc.arrayLength = 4;
     desc.storageMode = MTLStorageModePrivate;
-    desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
     id<MTLTexture> outputs[] = {[k.device newTextureWithDescriptor:desc],
+                              [k.device newTextureWithDescriptor:desc],
                               [k.device newTextureWithDescriptor:desc]};
-    CHECK(outputs[0] && outputs[1]);
+    CHECK(outputs[0] && outputs[1] && outputs[2]);
     const NSUInteger rowBytes = ((width * sizeof(float) + 255) / 256) * 256;
     const NSUInteger imageBytes = rowBytes * height, textureBytes = 4 * imageBytes;
-    id<MTLBuffer> readback = [k.device newBufferWithLength:2 * textureBytes
+    id<MTLBuffer> readback = [k.device newBufferWithLength:3 * textureBytes
                                                   options:MTLResourceStorageModeShared];
     CHECK(readback && readback.contents);
     std::memset(readback.contents, 0x7f, readback.length); // Sentinel detects unwritten valid pixels.
     id<MTLCommandBuffer> cmd = [q commandBuffer]; CHECK(cmd);
     id<MTLBlitCommandEncoder> init = [cmd blitCommandEncoder]; CHECK(init);
-    for (unsigned mode = 0; mode < 2; ++mode)
+    for (unsigned mode = 0; mode < 3; ++mode)
         for (unsigned layer = 0; layer < 4; ++layer)
             [init copyFromBuffer:readback sourceOffset:0 sourceBytesPerRow:rowBytes
              sourceBytesPerImage:imageBytes sourceSize:MTLSizeMake(width, height, 1)
                        toTexture:outputs[mode] destinationSlice:layer destinationLevel:0
               destinationOrigin:MTLOriginMake(0, 0, 0)];
     [init endEncoding];
-    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial];
-    CHECK(enc);
-    [enc setComputePipelineState:k.dequant];
-    [enc setBuffer:input offset:0 atIndex:0]; [enc setBuffer:offsets offset:0 atIndex:2];
-    for (unsigned mode = 0; mode < 2; ++mode) {
+    // 0: serial per-band; 1: serial batched; 2: concurrent per-band via disjoint aliased views.
+    for (unsigned mode = 0; mode < 3; ++mode) {
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoderWithDispatchType:
+            mode == 2 ? MTLDispatchTypeConcurrent : MTLDispatchTypeSerial];
+        CHECK(enc);
+        [enc setComputePipelineState:k.dequant];
+        [enc setBuffer:input offset:0 atIndex:0]; [enc setBuffer:offsets offset:0 atIndex:2];
         [enc setTexture:outputs[mode] atIndex:0];
-        const unsigned dispatches = mode == 0 ? bandCount : 1;
+        const unsigned dispatches = mode == 1 ? 1 : bandCount;
         for (unsigned b = 0; b < dispatches; ++b) {
             Push push = {{int32_t(width), int32_t(height)}, int32_t(firstBand + b),
                 int32_t(base + b * layerStride), int32_t(blocksX), int32_t(layerStride)};
+            if (mode == 2) {
+                id<MTLTexture> view = [outputs[2] newTextureViewWithPixelFormat:MTLPixelFormatR32Float
+                    textureType:MTLTextureType2DArray levels:NSMakeRange(0, 1)
+                    slices:NSMakeRange(firstBand + b, 1)];
+                CHECK(view); // Normal command-buffer retention keeps the bound view alive.
+                [enc setTexture:view atIndex:0];
+                push.outputLayer = 0; // One dispatched slice maps to the matching parent slice.
+            }
             [enc setBytes:&push length:sizeof(push) atIndex:1];
-            [enc dispatchThreadgroups:MTLSizeMake(blocksX, blocksY, mode == 0 ? 1 : bandCount)
+            [enc dispatchThreadgroups:MTLSizeMake(blocksX, blocksY, mode == 1 ? bandCount : 1)
                 threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         }
+        [enc endEncoding];
     }
-    [enc endEncoding];
     finishGPU(cmd);
     // Read back only after compute completion, then wait for the blits before CPU inspection.
     cmd = [q commandBuffer]; CHECK(cmd);
     id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder]; CHECK(blit);
-    for (unsigned mode = 0; mode < 2; ++mode)
+    for (unsigned mode = 0; mode < 3; ++mode)
         for (unsigned layer = 0; layer < 4; ++layer)
             [blit copyFromTexture:outputs[mode] sourceSlice:layer sourceLevel:0
                      sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1)
@@ -240,10 +259,12 @@ static void dequantBatchCase(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q,
         for (NSUInteger y = 0; y < height; ++y) {
             const auto *row = result + layer * imageBytes + y * rowBytes;
             CHECK(std::memcmp(row, row + textureBytes, width * sizeof(float)) == 0);
+            CHECK(std::memcmp(row, row + 2 * textureBytes, width * sizeof(float)) == 0);
             for (NSUInteger x = 0; x < width; ++x) {
                 uint32_t bits; float value;
                 std::memcpy(&bits, row + x * 4, 4); std::memcpy(&value, &bits, 4);
                 CHECK(bits != 0x7f7f7f7f);
+                if (fixtureMode != 0) CHECK(bits == 0u); // Exact +0 in all three outputs via memcmp above.
                 const unsigned block = unsigned(y / 32) * blocksX + unsigned(x / 32);
                 if (table[base + (layer - firstBand) * layerStride + block] == UINT32_MAX)
                     CHECK(value == 0.0f);
@@ -251,16 +272,16 @@ static void dequantBatchCase(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q,
             }
         }
     }
-    CHECK(sparseOnly ? (!positive && !negative) : (positive && negative));
+    CHECK(fixtureMode != 0 ? (!positive && !negative) : (positive && negative));
 }
 static void dequantBatchTests(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q)
 {
     for (unsigned bands : {3u, 4u})
         for (unsigned width : {4u, 65u})
-            for (bool sparse : {false, true}) {
-                @autoreleasepool { dequantBatchCase(k, q, width, width == 4 ? 4 : 33, bands, sparse); }
+            for (unsigned fixtureMode : {0u, 1u, 2u}) {
+                @autoreleasepool { dequantBatchCase(k, q, width, width == 4 ? 4 : 33, bands, fixtureMode); }
             }
-    std::puts("Dequant per-band/batched byte equivalence passed; NOT encoder/IDWT differential goldens");
+    std::puts("Dequant 3-strategy scheduling equivalence + analytic-zero oracle passed; NOT independent nonzero IDWT/encoder proof");
 }
 static void hardwareTests(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q)
 {
