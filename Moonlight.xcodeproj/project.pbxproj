@@ -138,6 +138,7 @@
 				Stream/PyroWave/MLPyrowaveCodec.cpp,
 				Stream/PyroWave/MLPyrowaveReceiver.cpp,
 				Stream/PyroWave/MLPyrowaveCoordinator.mm,
+				Stream/PyroWave/MLPyrowavePacketBridge.m,
 				Stream/PyroWave/MLPyrowaveMetalKernels.mm,
 				Stream/PyroWave/MLPyrowaveMetalDecoder.mm,
 				Stream/PyroWave/MLPyrowaveMetalRenderer.mm,

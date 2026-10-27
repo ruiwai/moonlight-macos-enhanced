@@ -13,6 +13,7 @@
 #include <stdatomic.h>
 #import "RendererLayerContainer.h"
 #import "MLAV1SoftwareDecoder.h"
+#import "PyroWave/MLPyrowaveMetalRenderer.h"
 
 #include "Limelight.h"
 #include <math.h>
@@ -45,6 +46,11 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
                               int write_seq_header);
 
 typedef struct MLDecodeFrameContext MLDecodeFrameContext;
+
+static uint64_t MLPyrowaveNowUs(void *context) {
+    (void)context;
+    return LiGetMicroseconds();
+}
 
 @interface VideoDecoderRenderer () <MTKViewDelegate>
 @property (nonatomic) int frameRate;
@@ -1472,6 +1478,9 @@ static BOOL MLGetSharedMetalPipelines(MTLPixelFormat pixelFormat,
     NSRecursiveLock *_decodeSubmitLock;
     // Set by -stop under the lock; frames that arrive afterwards are dropped.
     BOOL _decoderStopped;
+    MLPyrowaveMetalRenderer *_pyrowavePeer;
+    BOOL _pyrowaveMode, _pyrowaveDrawPending;
+    uint64_t _pyrowaveEpoch;
     NSUInteger _lastLoggedDrawableWidth;
     NSUInteger _lastLoggedDrawableHeight;
     OSType _lastLoggedDecodedPixelFormat;
@@ -2989,12 +2998,125 @@ static CGDirectDisplayID getDisplayID(NSScreen* screen)
     }
 }
 
+- (BOOL)setupPyrowaveWithConfiguration:(MLPyrowaveConfiguration)configuration
+                            frameRate:(int)frameRate error:(NSError **)error
+{
+    if (!MLPyrowaveValidatePresentationConfiguration(configuration, frameRate)) {
+        if (error) *error = [NSError errorWithDomain:@"MLPyrowaveSetup" code:1
+            userInfo:@{NSLocalizedDescriptionKey: @"Invalid PyroWave presentation configuration"}];
+        return NO;
+    }
+    if (error) *error = nil;
+    [_decodeSubmitLock lock];
+    BOOL ready = NO;
+    CGColorSpaceRef color = NULL;
+    do {
+        // Fresh instance only: prewarmed resources may exist, reconfiguration may not.
+        if (![NSThread isMainThread] || videoFormat != 0 || _decoderStopped ||
+            _pyrowaveMode || _pyrowavePeer || !_device || !_view) break;
+        id<MTLCommandQueue> queue = _commandQueue ?: [_device newCommandQueue];
+        if (!queue || queue.device != _device) break;
+        MTKView *candidate = _metalView ?: [[MTKView alloc] initWithFrame:_view.bounds device:_device];
+        CAMetalLayer *layer = (CAMetalLayer *)candidate.layer;
+        if (!candidate || ![layer isKindOfClass:[CAMetalLayer class]] ||
+            candidate.device != _device || layer.device != _device) break;
+        color = CGColorSpaceCreateWithName(kCGColorSpaceITUR_709);
+        if (!color) break;
+        MLPyrowaveMetalRenderer *peer = [MLPyrowaveMetalRenderer
+            rendererWithCommandQueue:queue configuration:configuration
+            clock:MLPyrowaveNowUs context:NULL error:error];
+        if (!peer) break; // Locals retire without changing existing renderer/UI.
+        // Dedicated transactional setup: no legacy setup, drawable acquisition or prewarm.
+        _commandQueue = queue;
+        _metalView = candidate;
+        _pyrowavePeer = peer;
+        candidate.frame = _view.bounds;
+        candidate.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        candidate.delegate = self;
+        candidate.paused = YES;
+        candidate.enableSetNeedsDisplay = NO;
+        candidate.framebufferOnly = YES;
+        candidate.preferredFramesPerSecond = MAX(frameRate, 60);
+        candidate.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
+        candidate.colorspace = color;
+        layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        layer.colorspace = color;
+        layer.wantsExtendedDynamicRangeContent = NO;
+        layer.presentsWithTransaction = NO;
+        layer.allowsNextDrawableTimeout = YES;
+        layer.maximumDrawableCount = 2;
+        layer.displaySyncEnabled = MLBoolForDisplaySyncMode(_displaySyncMode, _timingEnableVsync);
+        _requestedHdr = _enableHdr = _enable10BitSdr = NO;
+        _hdrOutputUsesEDR = _hdrToneMapToSDR = _dynamicDolbyVision = NO;
+        atomic_store(&_hostHdrState, 0);
+        atomic_store(&_hostHdrModeChanged, false);
+        _streamWidth = configuration.width; _streamHeight = configuration.height;
+        self.frameRate = frameRate;
+        _pyrowaveEpoch++;
+        _pyrowaveDrawPending = NO;
+        _pyrowaveMode = YES;
+        self->videoFormat = VIDEO_FORMAT_PYROWAVE;
+        _activeRendererMode = MLActiveVideoRendererModeEnhanced;
+        [layerContainer removeFromSuperview];
+        layerContainer = nil;
+        displayLayer = nil;
+        if (candidate.superview != _view) [_view addSubview:candidate];
+        ready = YES;
+    } while (NO);
+    if (color) CFRelease(color);
+    if (!ready && error && !*error) *error = [NSError errorWithDomain:@"MLPyrowaveSetup"
+        code:1 userInfo:@{NSLocalizedDescriptionKey:
+            @"PyroWave requires fresh main-thread SDR renderer and valid Metal session"}];
+    [_decodeSubmitLock unlock];
+    return ready;
+}
+
+- (int)submitPyrowavePacket:(const LI_PYROWAVE_RECEIVED_PACKET *)packet
+{
+    [_decodeSubmitLock lock];
+    int result = LI_PYROWAVE_PACKET_IGNORED;
+    if (!_decoderStopped && _pyrowaveMode && _pyrowavePeer)
+        result = [_pyrowavePeer submitPacket:packet];
+    if (result == LI_PYROWAVE_PACKET_VALIDATED_FRAME && !_pyrowaveDrawPending) {
+        _pyrowaveDrawPending = YES;
+        uint64_t epoch = _pyrowaveEpoch;
+        __weak VideoDecoderRenderer *weakSelf = self;
+        // Bounded one notification, never borrowed packet/frame or GPU work.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            VideoDecoderRenderer *renderer = weakSelf;
+            if (!renderer) return;
+            [renderer->_decodeSubmitLock lock];
+            MTKView *view = nil;
+            if (renderer->_pyrowaveEpoch == epoch && renderer->_pyrowaveMode &&
+                !renderer->_decoderStopped) {
+                renderer->_pyrowaveDrawPending = NO;
+                view = renderer->_metalView;
+            }
+            [renderer->_decodeSubmitLock unlock];
+            [view draw]; // The delegate rechecks admission, including stop.
+        });
+    }
+    [_decodeSubmitLock unlock];
+    return result;
+}
+
 - (void)setupWithVideoFormat:(int)videoFormat
                    frameRate:(int)frameRate
                upscalingMode:(int)upscalingMode
                 streamConfig:(StreamConfiguration *)streamConfig
 {
     [_decodeSubmitLock lock];
+    if (videoFormat == VIDEO_FORMAT_PYROWAVE) {
+        [_decodeSubmitLock unlock];
+        return; // No legacy codec alias or implicit PyroWave reconfiguration.
+    }
+    if (_pyrowaveMode) {
+        [_pyrowavePeer stop];
+        _pyrowavePeer = nil;
+        _pyrowaveEpoch++;
+        _pyrowaveDrawPending = NO;
+        _pyrowaveMode = NO; // Explicit legacy setup retires the old generation.
+    }
     _decoderStopped = NO;
     [_decodeSubmitLock unlock];
     self->videoFormat = videoFormat;
@@ -5013,6 +5135,45 @@ void decompressionOutputCallback(void *decompressionOutputRefCon, void *sourceFr
 }
 
 - (void)drawInMTKView:(MTKView *)view {
+    [_decodeSubmitLock lock];
+    BOOL pyrowave = _pyrowaveMode;
+    uint64_t epoch = _pyrowaveEpoch;
+    MLPyrowaveMetalRenderer *peer = _pyrowavePeer;
+    BOOL stopped = _decoderStopped;
+    [_decodeSubmitLock unlock];
+    if (pyrowave) {
+        if (![NSThread isMainThread] || stopped || !peer || !view ||
+            self.presentationSuspended) return;
+        // Drawable acquisition can block. Never hold the receive/stop lock here.
+        id<CAMetalDrawable> drawable = view.currentDrawable;
+        if (!drawable) return; // Backend pending frame remains owned there.
+        [_decodeSubmitLock lock];
+        if (_decoderStopped || !_pyrowaveMode || _pyrowaveEpoch != epoch ||
+            _pyrowavePeer != peer || self.presentationSuspended) {
+            [_decodeSubmitLock unlock];
+            return;
+        }
+        __weak VideoDecoderRenderer *weakSelf = self;
+        [drawable addPresentedHandler:^(id<MTLDrawable> presented) {
+            double time = presented.presentedTime;
+            void (^record)(void) = ^{
+                VideoDecoderRenderer *renderer = weakSelf;
+                if (!renderer) return;
+                [renderer->_decodeSubmitLock lock];
+                if (!renderer->_decoderStopped && renderer->_pyrowaveMode &&
+                    renderer->_pyrowaveEpoch == epoch && time > 0)
+                    [renderer recordRenderedFrameSampleAtTimeMs:LiGetMillis()
+                        enqueueTimeMs:0 presentationTimeSeconds:time];
+                [renderer->_decodeSubmitLock unlock];
+            };
+            if ([NSThread isMainThread]) record();
+            else dispatch_async(dispatch_get_main_queue(), record);
+        }];
+        // Backend is sole commit owner. GPU completion is NOT display ack.
+        [peer renderPendingToDrawable:drawable completion:nil];
+        [_decodeSubmitLock unlock];
+        return;
+    }
     if (_activeRendererMode != MLActiveVideoRendererModeEnhanced) {
         return;
     }
@@ -5458,6 +5619,7 @@ void decompressionOutputCallback(void *decompressionOutputRefCon, void *sourceFr
     _enhancedStartupPacingUntilMs = _rendererStartTimeMs + kMLEnhancedStartupPacingWindowMs;
     _enhancedStartupPresentedFrameCount = 0;
     _didLogEnhancedStartupPacing = NO;
+    if (_pyrowaveMode) return; // Raw receive-driven draws, never CVDisplayLink.
     if (self.directSubmission) {
         // common-c owns the receive-thread lifecycle. VideoToolbox decodes
         // asynchronously and AVSampleBufferDisplayLayer owns presentation.
@@ -5714,6 +5876,10 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     // stopping it waits for that callback. A frame already being decoded finishes first.
     [_decodeSubmitLock lock];
     _decoderStopped = YES;
+    [_pyrowavePeer stop];
+    _pyrowavePeer = nil;
+    _pyrowaveEpoch++;
+    _pyrowaveDrawPending = NO; // Keep mode: stale draws must not enter legacy.
     [self clearCurrentFrame];
     [self teardownDecompressionSession];
     [self teardownDolbyVisionMetadataSession];

@@ -1,9 +1,11 @@
 // Synthetic CPU composition, not encrypted network/GPU/live app wiring.
 #import "MLPyrowaveCoordinator.h"
+#import "MLPyrowavePacketBridge.h"
 #include "MLPyrowaveReceiver.hpp"
 #include "common_coordinator_transport.h"
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -52,28 +54,29 @@ static Shards build(uint32_t id = Id, const uint8_t *codec = Codec.data())
 struct Clock { uint64_t now = 100; };
 static uint64_t tick(void *p) { return static_cast<Clock *>(p)->now; }
 static uint64_t liveTick(void *) { return LiGetMicroseconds(); }
-struct Capture {
-    __strong MLPyrowaveCoordinator *coordinator = nil;
-    unsigned calls = 0;
-    int last = -1;
-};
-static int forward(void *context, const LI_PYROWAVE_RECEIVED_PACKET *packet)
+@interface Capture : NSObject <MLPyrowavePacketSink>
+@property(nonatomic, strong) MLPyrowaveCoordinator *coordinator;
+@property(nonatomic) unsigned calls;
+@property(nonatomic) int last;
+@end
+@implementation Capture
+- (int)submitPyrowavePacket:(const LI_PYROWAVE_RECEIVED_PACKET *)packet
 {
-    auto &c = *static_cast<Capture *>(context);
-    ++c.calls;
-    c.last = [c.coordinator submitPacket:packet]; // No canned result or bypass.
-    return c.last;
+    self.calls++;
+    self.last = [self.coordinator submitPacket:packet]; // Actual result, no bypass.
+    return self.last;
 }
+@end
 struct Fixture {
-    Capture capture;
+    __strong Capture *capture;
     CommonTransport *transport;
-    Fixture(Clock *clock, uint64_t generation) {
+    Fixture(Clock *clock, uint64_t generation) : capture([Capture new]) {
+        capture.last = -1;
         const MLPyrowaveConfiguration config = {128, 128, 256, 0, 0, generation};
         capture.coordinator = [[MLPyrowaveCoordinator alloc] initWithConfiguration:config
                                       clock:clock ? tick : liveTick context:clock];
         CHECK(capture.coordinator);
-        const LI_PYROWAVE_PACKET_CALLBACKS callbacks = {
-            LI_PYROWAVE_PACKET_CALLBACK_VERSION2, &capture, forward};
+        const auto callbacks = MLPyrowaveCallbacksForSink(capture);
         transport = transportCreate(&callbacks); CHECK(transport);
         CHECK(!transportFullFrame(transport));
     }
@@ -84,6 +87,53 @@ struct Fixture {
     Fixture(const Fixture &) = delete;
     Fixture &operator=(const Fixture &) = delete;
 };
+static void testPresentationConfiguration()
+{
+    const MLPyrowaveConfiguration valid = {128, 128, 256, 0, 0, 1};
+    CHECK(MLPyrowaveValidatePresentationConfiguration(valid, 60));
+    auto bad = valid; bad.generation = 0;
+    CHECK(!MLPyrowaveValidatePresentationConfiguration(bad, 60));
+    for (uint32_t packet : {0u, 128u, 65537u, UINT32_MAX}) {
+        bad = valid; bad.maxPacketSize = packet;
+        CHECK(!MLPyrowaveValidatePresentationConfiguration(bad, 60));
+    }
+    for (uint32_t dimension : {0u, 1u, 3u, 16385u, 16386u, UINT32_MAX}) {
+        bad = valid; bad.width = dimension;
+        CHECK(!MLPyrowaveValidatePresentationConfiguration(bad, 60));
+        bad = valid; bad.height = dimension;
+        CHECK(!MLPyrowaveValidatePresentationConfiguration(bad, 60));
+    }
+    for (uint8_t value : {2, 255}) {
+        bad = valid; bad.range = value;
+        CHECK(!MLPyrowaveValidatePresentationConfiguration(bad, 60));
+        bad = valid; bad.siting = value;
+        CHECK(!MLPyrowaveValidatePresentationConfiguration(bad, 60));
+    }
+    for (int fps : {0, -1, INT_MIN})
+        CHECK(!MLPyrowaveValidatePresentationConfiguration(valid, fps));
+    for (uint32_t width : {2u, 16384u}) for (uint32_t height : {2u, 16384u})
+        for (uint32_t packet : {129u, 65536u}) for (uint8_t range : {0, 1})
+            for (uint8_t siting : {0, 1}) for (int fps : {1, INT_MAX}) {
+                const MLPyrowaveConfiguration edge = {width, height, packet, range, siting, UINT64_MAX};
+                CHECK(MLPyrowaveValidatePresentationConfiguration(edge, fps));
+            } // CPU shape limits only, NOT GPU availability or footprint assertions.
+}
+static void testAdapterDefenses()
+{
+    const auto disabled = MLPyrowaveCallbacksForSink(nil);
+    CHECK(disabled.version == 0 && !disabled.context && !disabled.submit);
+    Clock clock; Fixture f(&clock, 1);
+    const auto callbacks = MLPyrowaveCallbacksForSink(f.capture);
+    CHECK(callbacks.version == LI_PYROWAVE_PACKET_CALLBACK_VERSION2);
+    CHECK(callbacks.context == (__bridge void *)f.capture && callbacks.submit);
+    const LI_PYROWAVE_RECEIVED_PACKET empty = {};
+    CHECK(callbacks.submit(nullptr, &empty) == LI_PYROWAVE_PACKET_IGNORED);
+    CHECK(callbacks.submit(callbacks.context, nullptr) == LI_PYROWAVE_PACKET_IGNORED);
+    CHECK(f.capture.calls == 0);
+    CHECK(callbacks.submit(callbacks.context, &empty) == LI_PYROWAVE_PACKET_IGNORED);
+    CHECK(f.capture.calls == 1 && f.capture.last == LI_PYROWAVE_PACKET_IGNORED);
+    // Existing composition cases below prove exact VALIDATED_FRAME forwarding.
+}
 static int send(Fixture &f, const Packet &p, uint32_t id, uint64_t receive = 100)
 {
     const unsigned before = f.capture.calls;
@@ -217,6 +267,7 @@ static void testRealRtpIngress()
 int main()
 {
     @autoreleasepool {
+        testPresentationConfiguration(); testAdapterDefenses();
         testDirectIsolationAndOwnership(); testBadCodecAndExpiry(); testRealRtpIngress();
     }
     std::puts("actual Common -> coordinator -> watchdog CPU checks passed");

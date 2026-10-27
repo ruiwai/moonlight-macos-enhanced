@@ -2,7 +2,7 @@
 
 ## Status, pins and scope
 
-Common raw bridge version 2 at `9af0c8c` retains SDR negotiation introduced at `e26d480`; standalone coordinator/Metal components exist, but app selection/preflight and live coordinator/Metal/presentation wiring remain absent.
+Common raw bridge version 2 at `9af0c8c` retains SDR negotiation introduced at `e26d480`. Conditional app receive-to-present wiring now exists; selection/preflight remains absent and PyroWave is not offered. Production compilation and live validation of this change are unverified.
 Native Common pin: `9af0c8cc9be21afce5c735c7876ba03884f7d84c`. Historical parent `f1c45a8` app [run 40481438739](https://github.com/ruiwai/moonlight-macos-enhanced/actions/runs/40481438739) passed.
 That app log contains all eight native PyroWave `CompileC` units once each, plus Common `PyrowaveProtocol.c` / `PyrowaveReassembly.c` once each; no PBX edits were needed.
 Successful compilation/linking does not establish class/symbol retention under dead stripping, live wiring, or readiness; retention remains unknown.
@@ -11,7 +11,7 @@ Wire contract: protocol **2**, bitstream **2**, payload **3**; exact encoder ref
 Initial scope: supported Apple Silicon, SDR BT.709, 8-bit 4:2:0, negotiated range/siting; FP32 arithmetic **and storage**. HDR/444/10-bit and FP16 are deferred.
 Local designs `docs/pyrowave-protocol-contract.md` and `docs/pyrowave-metal-decoder.md` provide background, not tracked remote documents or current dependency/build inventory.
 Their older missing-dependency statements do not describe this baseline; neither design is changed here.
-Existing symbols below are source anchors. **Common raw descriptor/route/gates and negotiation are implemented; new app APIs, selection/preflight and coordinator/renderer wiring below are PROPOSED.**
+Existing symbols below are source anchors. **Common raw descriptor/route/gates and negotiation are implemented. App receive-to-present wiring is implemented below; remaining selection/preflight and broader design sections are PROPOSED, not enablement.**
 
 ## Current → planned call path and selection
 
@@ -19,13 +19,13 @@ Existing symbols below are source anchors. **Common raw descriptor/route/gates a
 
 | Existing file:symbol | Current responsibility → planned app/integration work |
 | --- | --- |
-| `Native/Limelight/Stream/Connection.m:DrDecoderSetup`, `_drCallbacks`, `RegisterConnection` | Legacy renderer setup and per-connection callbacks/context → own preflight/selection and the per-connection raw-packet descriptor. |
+| `Native/Limelight/Stream/Connection.m:DrDecoderSetup`, `_drCallbacks`, `RegisterConnection` | Legacy setup plus exact PyroWave main-thread setup and explicit-context packet descriptor; preflight/selection remains planned. |
 | `Common/src/RtspConnection.c:performRtspHandshakeCtx` | Implemented bounded five-attribute PyroWave parser/helper and per-context retained contract → app opt-in/preflight remains planned. |
 | `Common/src/SdpGenerator.c:getAttributesList` | Implemented selected SDR contract validation and ANNOUNCE feature/attributes; unselected legacy output remains unchanged. |
-| `Common/src/RtpVideoQueue.c:RtpvAddPacket` | Implemented selected PyroWave version-2 route bypasses legacy FEC, contiguous RTP sequence and 16-bit frame-index rejection; preserves full outer identity/timing → app reassembly ownership remains planned. |
-| `Common/src/VideoDepacketizer.c:queueRtpPacketCtx` | Implemented selected PyroWave raw hook before millisecond conversion/legacy H.26x processing; validates bounds, borrows synchronously and frees → app callback remains planned. |
-| `Native/Limelight/Stream/Connection.m:DrSubmitDecodeUnit`, `DrStop` | Legacy submit/stop → separate raw packet dispatch and generation-safe coordinator teardown; preserve legacy behavior. |
-| `Native/Limelight/Stream/VideoDecoderRenderer.m:setupMetalRenderer`, `encodePresentFromTexture:toDrawable:commandBuffer:` | Existing renderer device/scheduling/RGB presentation → new three-plane decode/color bridge, not a VideoToolbox compressed-format alias. |
+| `Common/src/RtpVideoQueue.c:RtpvAddPacket` | Implemented selected PyroWave version-2 route bypasses legacy FEC, contiguous RTP sequence and 16-bit frame-index rejection; preserves full outer identity/timing → conditional app coordinator owns reassembly. |
+| `Common/src/VideoDepacketizer.c:queueRtpPacketCtx` | Implemented selected PyroWave raw hook before millisecond conversion/legacy H.26x processing; validates bounds, borrows synchronously and frees → production protocol adapter forwards to renderer. |
+| `Native/Limelight/Stream/Connection.m:DrSubmitDecodeUnit`, `DrStop` | Legacy submit/stop plus separate raw sink dispatch and epoch-safe peer stop before target clearing; legacy behavior preserved. |
+| `Native/Limelight/Stream/VideoDecoderRenderer.m:setupPyrowaveWithConfiguration:frameRate:error:` | Dedicated transactional MTKView setup on the existing device/queue supplies the separate three-plane Metal peer; no legacy setup/prewarm or VideoToolbox alias. |
 
 Implemented Common negotiation at `e26d480` parses all five complete decimal attributes under `x-ss-pyrowave.*`:
 `protocolVersion`, `bitstreamVersion`, `payloadVersion`, `capabilityFlags`, `maxPacketSize`.
@@ -42,7 +42,7 @@ and `StreamViewController.m` (currently clamps codec indices to 0..2) before `Co
 Preserve all existing stored indices; handle the new value explicitly rather than extending Connection's legacy ordinal comparisons.
 Display actual negotiated format and initial fallback reason without rewriting saved preference; no in-stream codec switch.
 
-## Raw Common implemented / app ownership PROPOSED
+## Raw Common and conditional app ownership implemented
 
 Implemented `Common/src/Limelight.h:DECODER_RENDERER_CALLBACKS.pyrowave` is a same-build/source extension, not old-binary ABI compatible:
 `LI_PYROWAVE_PACKET_CALLBACKS` contains version, application context and submit pointer; public `DECODE_UNIT` layout is unchanged by this bridge.
@@ -51,13 +51,13 @@ Version 2 borrows immutable inner packet bytes/length, full outer frame ID and R
 Submission is synchronous; retain nothing borrowed. Common owns/frees the RTP allocation once after return, also on raw-path drops; callbacks must not free it or synchronously stop/destroy Common.
 `queueRtpPacketCtx` checks runtime RTP/extension/NV lengths and raw bounds before dispatch, before microsecond truncation or `processRtpPayload`.
 No callback when unselected; `VideoStream.c:startVideoStreamCtx` already rejects selected PyroWave without capability, submit or descriptor version 2 before setup/sockets.
-The raw route returns without legacy decode-unit/IDR processing; unselected legacy ownership remains unchanged. No app calls this bridge, registers a callback or opts in.
-PROPOSED app ownership below is not implemented; app selection/preflight, coordinator, Metal and presentation remain disabled/unwired despite Common negotiation support.
+The raw route returns without legacy decode-unit/IDR processing; unselected legacy ownership remains unchanged. The app registers `MLPyrowaveCallbacksForSink(self)` after callback initialization, without offering a format or capability.
+The nonretaining explicit-context protocol adapter forwards synchronously through a strong Connection renderer snapshot; registry/strong terminate ownership retains its context through Common cleanup/join. No TLS or borrowed packet escapes.
 Context remains valid until the receive thread joins. `VideoStream.c:stopVideoStreamCtx` calls stop **before** joins, cleanup **after** joins:
 submissions may follow stop and be discarded, but never follow cleanup. A callback extension must preserve this existing contract.
 `Connection.m` passes itself through application context backed by the owned `RegisterConnection` registry lifetime through `LiStopConnectionCtx`/joins.
 The setup `void *` / `(__bridge void *)self` does **not** retain Connection; registry and explicit strong shutdown ownership do.
-The raw callback snapshots strong coordinator and renderer references under `_stateLock`; do not depend solely on thread-local `CurrentConnection`.
+The raw callback snapshots the renderer under `_stateLock`, releases that lock, then invokes its sink; the renderer owns the Metal peer/coordinator under `_decodeSubmitLock`.
 Stop invalidates admission/generation under the same state discipline **before** `ConnectionClearRuntimeTargets`; cleanup releases context after joins.
 Snapshots protect lifetime, not admission: publication must serialize with stop and recheck generation so a late snapshot cannot publish stale work.
 
@@ -65,7 +65,7 @@ Snapshots protect lifetime, not admission: publication must serialize with stop 
 Watchdog result routing and the filter helper are implemented and synthetically tested at `9af0c8c`, not live encrypted/network validation.
 The new non-GPU `test_common_coordinator.mm` composes actual Common queue/depacketizer → coordinator → watchdog with synthetic PYRF; macOS execution is pending.
 It includes direct deterministic timing and actual `RtpvAddPacket`/`LiGetMicroseconds` timing, owned recovery/TLV/codec gating, replay/stop/expiry and opposite-TLS isolation.
-This gate is not live app wiring: encrypted network reorder/wrap/replay/watchdog coverage, actual-device integration and enablement qualification remain required.
+This CPU gate now uses the production adapter, not UI/Metal execution: encrypted network reorder/wrap/replay/watchdog coverage, actual-device integration and enablement qualification remain required.
 
 ## PROPOSED coordinator: synchronous CPU boundary, bounded GPU admission
 
@@ -135,4 +135,9 @@ At exact Common `9af0c8cc9be21afce5c735c7876ba03884f7d84c`, [run 40403395078](ht
 Parent baseline `6e97b2f` passed all three CI workflows: PyroWave CPU prerequisites, Input (12/12 CTests), macOS app build/draft; reviewed logs `/tmp/pyrowave-6e97b2f-404017*-reviewed.log` include single compilation of both Common units. This is baseline evidence, not new-pin parent CI, which remains pending.
 These establish their recorded CPU/build/draft boundaries only: no GPU correctness, live-stream interoperability or performance claim.
 Future implementation proceeds in focused bounded changes: one focused commit/push at a time, inspect `gh` run/job logs before the next; acceptance evidence must match the final snapshot.
-The earlier membership/documentation-only slice is historical; this repin uses local static inspection only. App/runtime gates and new-pin parent CI remain open; no app callback/coordinator, Metal, preflight or selection is enabled.
+Conditional app wiring handles exact `VIDEO_FORMAT_PYROWAVE` separately from legacy VT: SDR709/range checks, negotiated inner packet limit, callback dimensions/FPS, centered siting 0 and fresh generation 1.
+Setup is main-only/fresh-instance-only (no PyroWave reconfiguration); CPU app-boundary validation precedes UI/GPU work, not GPU availability/budget proof. The actual peer factory must succeed on the existing device/local queue before publishing or mutating/attaching the candidate view; failures leave renderer/UI unchanged and return -1, never a VT alias.
+Dedicated setup enforces BGRA8Unorm/ITUR709/EDR-off, framebuffer-only, two drawables and timeout; it never calls legacy setup/prewarm, acquires a drawable or commits. The selected Common dynamic-range mode must explicitly be SDR, independently of preferences.
+Validated CPU packets coalesce one weak main draw notification; drawable acquisition is outside the submit/stop lock. Stop drops the peer and invalidates epochs before teardown; queued draws/presented callbacks recheck epochs.
+Only drawable presentation records rendered/first-frame statistics, with enqueue time 0 (no unverified clock-domain latency); GPU completion is not display acknowledgement.
+Local static checks are not native compilation. No `supportedVideoFormats`, `CAPABILITY_PYROWAVE`, settings or Auto change; future preflight-selection gating, macOS build/GPU and live-host evidence remain required before any enablement claim.

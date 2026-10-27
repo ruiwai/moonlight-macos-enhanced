@@ -148,11 +148,14 @@ jobs:
             -c tests/pyrowave/common_coordinator_transport.c \
             -o "$RUNNER_TEMP/common-coordinator-transport.o"
           # Use the full dylib, never standalone Common protocol/reassembly objects.
+          xcrun clang -std=c11 -fobjc-arc "${flags[@]}" -I "$common/src" -I "$native" \
+            -c "$native/MLPyrowavePacketBridge.m" -o "$RUNNER_TEMP/pyrowave-packet-bridge.o"
           objects=("$RUNNER_TEMP/MLPyrowaveCodec-coordinator.o"
                    "$RUNNER_TEMP/MLPyrowaveReceiver-coordinator.o"
                    "$RUNNER_TEMP/MLPyrowaveMetadata-pipeline.o"
                    "$RUNNER_TEMP/MLPyrowaveReassembly-pipeline.o"
-                   "$RUNNER_TEMP/common-coordinator-transport.o")
+                   "$RUNNER_TEMP/common-coordinator-transport.o"
+                   "$RUNNER_TEMP/pyrowave-packet-bridge.o")
           xcrun clang++ -std=c++14 -fobjc-arc "${flags[@]}" -I "$common/src" -I "$native" \
             "$native/MLPyrowaveCoordinator.mm" tests/pyrowave/test_common_coordinator.mm \
             "${objects[@]}" -L "$build" -lmoonlight-common-c -Wl,-rpath,"$build" \

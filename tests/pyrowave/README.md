@@ -16,7 +16,7 @@ dependency are initialized; no application build or other nested dependency is n
 At these pins, the protocol/reassembly helper sources are identical, but the
 public API and streaming integration are incompatible. Helper equality is not
 API/ABI compatibility: do not replace the native pin with Foundation Common.
-This prerequisite adds no application integration and leaves PyroWave disabled.
+The app now has conditional receive-to-present wiring; PyroWave remains unoffered/disabled.
 
 ## Common raw bridge /v2 (not app enablement)
 
@@ -25,7 +25,7 @@ and receive/presentation microseconds; received payload/descriptor are borrowed 
 Common frees the packet; copy anything retained, never free borrowed storage or synchronously stop/destroy Common. Context survives stop through joins/cleanup; submissions may follow stop, never cleanup.
 `submit` returns `int`: only `LI_PYROWAVE_PACKET_VALIDATED_FRAME` after synchronous owned complete PYRF recovery, protected TLV/codec and local-deadline validation satisfies the first-full-frame watchdog. Partial/malformed/expired/replayed input returns `LI_PYROWAVE_PACKET_IGNORED`; ignored/unknown results do not acknowledge a frame. This is not GPU/presentation success.
 PyroWave bypasses the encrypted pre-auth frame filter: authenticate first, then require app full-ID/replay validation; AES-GCM and timeouts are unchanged. Watchdog routing/filter helper tests are synthetic; the new owned-validator composition gate below awaits macOS execution, not live encrypted/network evidence.
-No app callback, app selection/preflight, Metal or presentation enablement is added.
+The CPU composition uses the production nonretaining `MLPyrowavePacketBridge` adapter, compiled separately as ARC Objective-C, forwarding into the actual coordinator. Nil sink/context/packet checks supplement exact IGNORED/VALIDATED_FRAME, isolation, ownership and stop cases. The app-boundary configuration helper is tested for each invalid field/FPS and valid edge limits; these are CPU shape checks, not GPU availability/budget proof. Native execution of this change is pending.
 [`PyrowavePacketCallbackTest.c`](../../moonlight-common/moonlight-common-c/tests/PyrowavePacketCallbackTest.c) links actual Common
 [`RtpVideoQueue.c`](../../moonlight-common/moonlight-common-c/src/RtpVideoQueue.c) / [`VideoDepacketizer.c`](../../moonlight-common/moonlight-common-c/src/VideoDepacketizer.c), checking exact identity/timing and selected-path gates.
 Its arbitrary synthetic payload is not real codec data or validator composition.
@@ -53,8 +53,8 @@ streaming validation. A green job does not qualify the feature for enablement.
 ## Metadata /v1 policy and coverage
 
 The pure C validator consumes only recovered protected metadata; envelope
-presence/geometry validation stays with its caller. It is not wired into Xcode
-or streaming. Output is required, cleared on entry and published only on complete
+presence/geometry validation stays with its caller. The conditional app peer now uses it;
+this section describes standalone CPU checks, not live streaming evidence. Output is required, cleared on entry and published only on complete
 success; latency is a unique big-endian uint16 in 0.1 ms units, never inherited.
 Both flag layers reject unknown bits and OPTIONAL/REQUIRED conflicts. Nonempty
 regions need envelope PROTECTED, not entry PROTECTED. Reserved/unknown entries
@@ -258,8 +258,8 @@ real encoder conformance, deterministic Busy coverage, streaming or feature read
 
 ## Standalone SDR Metal renderer (not live enablement)
 `MLPyrowaveMetalRenderer` is an opt-in peer consuming public coordinator packets,
-on the supplied existing renderer queue/device only; no settings/Connection or
-VideoDecoderRenderer wiring. Fixed session, permanent stop, one pending + one
+on the supplied existing renderer queue/device only; conditional Connection/
+VideoDecoderRenderer wiring now exists, but settings/selection remain absent. Fixed session, permanent stop, one pending + one
 render-local owner; decoder Busy drops the consumed frame without retaining a retry.
 Nil/invalid targets preserve pending. BGRA8Unorm only, aspect-fit full-target black clear.
 Non-memoryless storage (stored result required). Fractional viewport; texture-bounded

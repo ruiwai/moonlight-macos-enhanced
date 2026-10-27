@@ -10,6 +10,7 @@
 #import "Ds5HapticsAudioRenderer.h"
 #import "MLAudioBitstreamOutput.h"
 #import "MLAV1SoftwareDecoder.h"
+#import "PyroWave/MLPyrowavePacketBridge.h"
 #import "Logger.h"
 #import "Utils.h"
 
@@ -173,7 +174,7 @@ typedef NS_ENUM(NSInteger, MLAudioRendererBackend) {
     MLAudioRendererBackendBitstream = 3,
 };
 
-@interface Connection ()
+@interface Connection () <MLPyrowavePacketSink>
 #if defined(LI_MIC_CONTROL_START)
 @property (nonatomic, strong) AVAudioEngine* micAudioEngine;
 @property (nonatomic, strong) AVAudioConverter* micConverter;
@@ -935,6 +936,34 @@ int DrDecoderSetup(int videoFormat, int width, int height, int redrawRate, void*
     VideoDecoderRenderer *renderer = ConnectionGetRendererSnapshot(conn);
     if (renderer == nil) {
         return -1;
+    }
+    if (videoFormat == VIDEO_FORMAT_PYROWAVE) {
+        StreamConfiguration *config = conn->_rendererStreamConfig;
+        if (!config || config.enableHdr || config.enable10BitSdr || config.enableYuv444 ||
+            conn->_streamConfig.dynamicRangeMode != DYNAMIC_RANGE_MODE_SDR ||
+            conn->_streamConfig.colorSpace != COLORSPACE_REC_709 ||
+            (conn->_streamConfig.colorRange != COLOR_RANGE_FULL &&
+             conn->_streamConfig.colorRange != COLOR_RANGE_LIMITED) ||
+            width <= 0 || height <= 0 || redrawRate <= 0) return -1;
+        // Common range values are the inverse of the native codec contract.
+        MLPyrowaveConfiguration pyro = {(uint32_t)width, (uint32_t)height,
+            conn->_connectionContext.NegotiatedPyrowave.maxPacketSize,
+            conn->_streamConfig.colorRange == COLOR_RANGE_FULL ? 0 : 1,
+            0, 1}; // Current-only centered siting; fresh renderer generation.
+        __block BOOL ready = NO;
+        __block NSError *error = nil;
+        void (^setup)(void) = ^{
+            ready = [renderer setupPyrowaveWithConfiguration:pyro frameRate:redrawRate error:&error];
+        };
+        // No _stateLock is held across the main-thread setup or renderer calls.
+        if ([NSThread isMainThread]) setup();
+        else dispatch_sync(dispatch_get_main_queue(), setup);
+        if (!ready) {
+            Log(LOG_E, @"[pyrowave] Renderer setup failed: %@", error);
+            return -1;
+        }
+        renderer.directSubmission = YES;
+        return 0;
     }
     renderer.directSubmission = (conn->_drCallbacks.capabilities & CAPABILITY_DIRECT_SUBMIT) != 0;
     [renderer setupWithVideoFormat:videoFormat
@@ -4429,6 +4458,12 @@ void ClClipboardDataReceived(const uint8_t *data, uint32_t length)
     });
 }
 
+- (int)submitPyrowavePacket:(const LI_PYROWAVE_RECEIVED_PACKET *)packet
+{
+    VideoDecoderRenderer *renderer = ConnectionGetRendererSnapshot(self);
+    return renderer ? [renderer submitPyrowavePacket:packet] : LI_PYROWAVE_PACKET_IGNORED;
+}
+
 -(id) initWithConfig:(StreamConfiguration*)config renderer:(VideoDecoderRenderer*)myRenderer connectionCallbacks:(id<ConnectionCallbacks>)callbacks
 {
     self = [super init];
@@ -4851,6 +4886,9 @@ void ClClipboardDataReceived(const uint8_t *data, uint32_t length)
     memcpy(_streamConfig.remoteInputAesIv, &riKeyId, sizeof(riKeyId));
 
     LiInitializeVideoCallbacks(&_drCallbacks);
+    // Borrowed context stays alive via RegisterConnection and strong terminate
+    // ownership through LiStopConnectionCtx/receive joins, NOT early cleanup.
+    _drCallbacks.pyrowave = MLPyrowaveCallbacksForSink(self);
     _drCallbacks.setup = DrDecoderSetup;
     _drCallbacks.start = DrStart;
     _drCallbacks.stop = DrStop;
