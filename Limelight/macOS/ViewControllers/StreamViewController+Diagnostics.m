@@ -1996,28 +1996,31 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
     }
     
     // Network
-    append(@"  ", labelAttrs);
-    append(MLString(@"Stream Latency", nil), labelAttrs);
-    append(@" ", labelAttrs);
-    if (streamLatencyAvailable) {
-        if (streamLatencyApproximate) {
-            append(@"~", labelAttrs);
+    if (!pyrowave) {
+        append(@"  ", labelAttrs);
+        append(MLString(@"Stream Latency", nil), labelAttrs);
+        append(@" ", labelAttrs);
+        if (streamLatencyAvailable) {
+            if (streamLatencyApproximate) {
+                append(@"~", labelAttrs);
+            }
+            append([NSString stringWithFormat:@"%.1f", streamLatencyMs], valueAttrs);
+            append(@" ms", labelAttrs);
+        } else {
+            append(MLString(@"Not Available", nil), valueAttrs);
         }
-        append([NSString stringWithFormat:@"%.1f", streamLatencyMs], valueAttrs);
-        append(@" ms", labelAttrs);
-    } else {
-        append(MLString(@"Not Available", nil), valueAttrs);
+        append(@"  Loss ", labelAttrs);
+        append([NSString stringWithFormat:@"%.2f%%", loss], valueAttrs);
     }
-    append(@"  Loss ", labelAttrs);
-    append(pyrowave ? @"N/A" : [NSString stringWithFormat:@"%.2f%%", loss], valueAttrs);
-    if (pyrowave) append(rttAvailable ? [NSString stringWithFormat:@"  RTT %u ms", rtt] : @"  RTT N/A", valueAttrs);
+    if (pyrowave && rttAvailable) {
+        append([NSString stringWithFormat:@"  RTT %u ms", rtt], valueAttrs);
+    }
 
     // Network-side loss from common-c (3 s window, excludes decoder drops) and
     // cumulative RS FEC outcomes. The feedback pair is what this client last
     // reported to the host; it only exists when the host accepted FEC control.
     MLNetworkStatsSnapshot net = {0};
-    if (pyrowave) append(@"  Net/FEC N/A", valueAttrs);
-    else if ([self.streamMan.connection getNetworkStatsSnapshot:&net]) {
+    if (!pyrowave && [self.streamMan.connection getNetworkStatsSnapshot:&net]) {
         append(@"  Net ", labelAttrs);
         append([NSString stringWithFormat:@"%.2f%%", net.networkFrameLossPercent], valueAttrs);
         if (net.fecRecovered > 0 || net.fecFailed > 0) {
@@ -2034,9 +2037,12 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
         }
     }
 
-    append(@"  Jit ", labelAttrs);
-    append(pyrowave ? @"N/A" : [NSString stringWithFormat:@"%.1f", jitter], valueAttrs);
-    append(pyrowave ? @"  Inner Rx " : @" ms  Br ", labelAttrs);
+    if (!pyrowave) {
+        append(@"  Jit ", labelAttrs);
+        append([NSString stringWithFormat:@"%.1f", jitter], valueAttrs);
+        append(@" ms", labelAttrs);
+    }
+    append(pyrowave ? @"  Inner Rx " : @"  Br ", labelAttrs);
     append([NSString stringWithFormat:@"%.1f", bitrateMbps], valueAttrs);
     append(@" Mbps", labelAttrs);
     append(@"  Pace ", labelAttrs);
@@ -2050,19 +2056,25 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
     }
     
     // Latency
-    append(@"  |  ", labelAttrs);
-    append(MLString(@"Pipeline", nil), labelAttrs);
-    append(@" ", labelAttrs);
-    append(pyrowave ? @"N/A" : [NSString stringWithFormat:@"%.2f", pipelineTime], valueAttrs);
-    append(@" ms · ", labelAttrs);
-    append(MLString(@"Host", nil), labelAttrs);
-    append(@" ", labelAttrs);
-    append(pyrowave ? @"N/A" : [NSString stringWithFormat:@"%.1f", encodeTime], valueAttrs);
-    append(pyrowave ? @" · Submit→complete (wall) " : @" ms · Decode ", labelAttrs);
-    append(pyrowave && stats.decodedFrames == 0 ? @"N/A" : [NSString stringWithFormat:@"%.2f", decodeTime], valueAttrs);
-    append(@" ms · Queue ", labelAttrs);
-    append(pyrowave ? @"N/A" : [NSString stringWithFormat:@"%.2f", renderTime], valueAttrs);
-    append(@" ms", labelAttrs);
+    if (!pyrowave) {
+        append(@"  |  ", labelAttrs);
+        append(MLString(@"Pipeline", nil), labelAttrs);
+        append(@" ", labelAttrs);
+        append([NSString stringWithFormat:@"%.2f", pipelineTime], valueAttrs);
+        append(@" ms · ", labelAttrs);
+        append(MLString(@"Host", nil), labelAttrs);
+        append(@" ", labelAttrs);
+        append([NSString stringWithFormat:@"%.1f", encodeTime], valueAttrs);
+        append(@" ms · Decode ", labelAttrs);
+        append([NSString stringWithFormat:@"%.2f", decodeTime], valueAttrs);
+        append(@" ms · Queue ", labelAttrs);
+        append([NSString stringWithFormat:@"%.2f", renderTime], valueAttrs);
+        append(@" ms", labelAttrs);
+    } else if (stats.decodedFrames > 0) {
+        append(@"  |  Submit→complete (wall) ", labelAttrs);
+        append([NSString stringWithFormat:@"%.2f", decodeTime], valueAttrs);
+        append(@" ms", labelAttrs);
+    }
 
     if (self.streamHealthNoPayloadStreak > 0) {
         append(@"  |  Stall ", labelAttrs);
