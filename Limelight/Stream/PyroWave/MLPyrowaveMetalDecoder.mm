@@ -78,15 +78,16 @@ bool PaddedSize(MTLSizeAndAlign sa, uint64_t &total)
     uint64_t padded;
     return sa.size && sa.align && Add(sa.size, sa.align - 1, padded) && Add(total, padded, total);
 }
-MTLTextureDescriptor *TextureDescriptor(NSUInteger w, NSUInteger h, bool pyramid)
+MTLTextureDescriptor *TextureDescriptor(NSUInteger w, NSUInteger h, NSUInteger slices, NSUInteger mips)
 {
+    const bool pyramid = slices > 1;
     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
     if (!d) return nil;
     d.textureType = pyramid ? MTLTextureType2DArray : MTLTextureType2D;
     d.pixelFormat = pyramid ? MTLPixelFormatR32Float : MTLPixelFormatR8Unorm;
     d.width = w; d.height = h;
-    d.arrayLength = pyramid ? 12 : 1;
-    d.mipmapLevelCount = pyramid ? 5 : 1;
+    d.arrayLength = slices;
+    d.mipmapLevelCount = mips;
     d.storageMode = MTLStorageModePrivate;
     d.hazardTrackingMode = MTLHazardTrackingModeTracked;
     d.usage = ReadWrite | (pyramid ? MTLTextureUsagePixelFormatView : 0);
@@ -140,7 +141,7 @@ public:
     id<MTLCommandQueue> queue;
     id<MTLHeap> privateHeap, sharedHeap;
     id<MTLBuffer> payload, offsets;
-    id<MTLTexture> pyramid, layers[3][5], ll[3][5], planes[3];
+    id<MTLTexture> lumaPyramid, chromaPyramid, layers[3][5], ll[3][5], planes[3];
     uint64_t gpuBytes;
     os_unfair_lock lock;
     bool stopped, busy, sampled, regressed;
@@ -159,10 +160,13 @@ bool AllocateViews(MLPyrowaveMetalPool *p, NSError **error)
     id<MTLDevice> d = p->kernels.device;
     for (unsigned c = 0; c < 3; ++c) {
         for (unsigned l = 0; l < 5; ++l) {
-            p->layers[c][l] = [p->pyramid newTextureViewWithPixelFormat:MTLPixelFormatR32Float
-                textureType:MTLTextureType2DArray levels:NSMakeRange(l, 1) slices:NSMakeRange(4 * c, 4)];
-            p->ll[c][l] = [p->pyramid newTextureViewWithPixelFormat:MTLPixelFormatR32Float
-                textureType:MTLTextureType2D levels:NSMakeRange(l, 1) slices:NSMakeRange(4 * c, 1)];
+            if (c != 0 && l == 0) continue; // 420 chroma finishes at level 1.
+            id<MTLTexture> pyramid = c ? p->chromaPyramid : p->lumaPyramid;
+            const NSUInteger mip = c ? l - 1 : l, slice = c ? 4 * (c - 1) : 0;
+            p->layers[c][l] = [pyramid newTextureViewWithPixelFormat:MTLPixelFormatR32Float
+                textureType:MTLTextureType2DArray levels:NSMakeRange(mip, 1) slices:NSMakeRange(slice, 4)];
+            p->ll[c][l] = [pyramid newTextureViewWithPixelFormat:MTLPixelFormatR32Float
+                textureType:MTLTextureType2D levels:NSMakeRange(mip, 1) slices:NSMakeRange(slice, 1)];
             if (!TextureMatches(p->layers[c][l], d, MTLTextureType2DArray, MTLPixelFormatR32Float,
                     p->layout.width[l], p->layout.height[l], 4, 1, ReadWrite) ||
                 !TextureMatches(p->ll[c][l], d, MTLTextureType2D, MTLPixelFormatR32Float,
@@ -174,20 +178,22 @@ bool AllocateViews(MLPyrowaveMetalPool *p, NSError **error)
     }
     return true;
 }
-bool AllocateResources(MLPyrowaveMetalPool *p, MTLTextureDescriptor * __strong const desc[4], NSError **error)
+bool AllocateResources(MLPyrowaveMetalPool *p, MTLTextureDescriptor * __strong const desc[5], NSError **error)
 {
     id<MTLDevice> d = p->kernels.device;
-    p->pyramid = [p->privateHeap newTextureWithDescriptor:desc[0]];
-    if (!TextureMatches(p->pyramid, d, MTLTextureType2DArray, MTLPixelFormatR32Float,
-        p->layout.width[0], p->layout.height[0], 12, 5,
-        ReadWrite | MTLTextureUsagePixelFormatView)) {
-        Fail(error, @"Decoder private R32Float 12-slice five-mip pyramid allocation/validation failed");
+    p->lumaPyramid = [p->privateHeap newTextureWithDescriptor:desc[0]];
+    p->chromaPyramid = [p->privateHeap newTextureWithDescriptor:desc[1]];
+    if (!TextureMatches(p->lumaPyramid, d, MTLTextureType2DArray, MTLPixelFormatR32Float,
+            p->layout.width[0], p->layout.height[0], 4, 5, ReadWrite | MTLTextureUsagePixelFormatView) ||
+        !TextureMatches(p->chromaPyramid, d, MTLTextureType2DArray, MTLPixelFormatR32Float,
+            p->layout.width[1], p->layout.height[1], 8, 4, ReadWrite | MTLTextureUsagePixelFormatView)) {
+        Fail(error, @"Decoder private R32Float luma/chroma pyramid allocation/validation failed");
         return false;
     }
     for (unsigned c = 0; c < 3; ++c) {
-        p->planes[c] = [p->privateHeap newTextureWithDescriptor:desc[c + 1]];
+        p->planes[c] = [p->privateHeap newTextureWithDescriptor:desc[c + 2]];
         if (!TextureMatches(p->planes[c], d, MTLTextureType2D, MTLPixelFormatR8Unorm,
-            desc[c + 1].width, desc[c + 1].height, 1, 1, ReadWrite)) {
+            desc[c + 2].width, desc[c + 2].height, 1, 1, ReadWrite)) {
             Fail(error, [NSString stringWithFormat:@"Decoder private R8Unorm plane %u allocation/validation failed", c]);
             return false;
         }
@@ -207,11 +213,11 @@ bool AllocateResources(MLPyrowaveMetalPool *p, MTLTextureDescriptor * __strong c
     std::memset(p->offsets.contents, 0xff, p->layout.offsetBytes);
     return AllocateViews(p, error);
 }
-bool AllocateHeaps(MLPyrowaveMetalPool *p, MTLTextureDescriptor * __strong const desc[4], NSError **error)
+bool AllocateHeaps(MLPyrowaveMetalPool *p, MTLTextureDescriptor * __strong const desc[5], NSError **error)
 {
     id<MTLDevice> d = p->kernels.device;
     uint64_t privateSize = 0, sharedSize = 0, sum;
-    for (unsigned i = 0; i < 4; ++i)
+    for (unsigned i = 0; i < 5; ++i)
         if (!desc[i] || !PaddedSize([d heapTextureSizeAndAlignWithDescriptor:desc[i]], privateSize)) {
             Fail(error, @"Decoder texture descriptor or heap texture size/alignment query invalid/overflowed");
             return false;
@@ -237,7 +243,7 @@ bool AllocateHeaps(MLPyrowaveMetalPool *p, MTLTextureDescriptor * __strong const
         Fail(error, @"Decoder fixed heaps allocation/device/storage/size validation failed or actual heaps plus CPU reservation exceeds 512 MiB");
         return false;
     }
-    return AllocateResources(p, desc, error); // Views alias the pyramid; no double charge.
+    return AllocateResources(p, desc, error); // Views alias the pyramids; no double charge.
 }
 bool Timely(MLPyrowaveMetalPool *p, const MLPyrowaveFrameInfo &info)
 {
@@ -359,10 +365,11 @@ bool EncodeIDWT(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
     pool->layout = layout; pool->session = session; pool->configuration = configuration;
     pool->kernels = kernels; pool->queue = commandQueue;
     pool->lock = OS_UNFAIR_LOCK_INIT; pool->clock = clock; pool->context = context;
-    MTLTextureDescriptor *desc[4] = {TextureDescriptor(layout.width[0], layout.height[0], true),
-        TextureDescriptor(session.width, session.height, false),
-        TextureDescriptor(session.width / 2, session.height / 2, false),
-        TextureDescriptor(session.width / 2, session.height / 2, false)};
+    MTLTextureDescriptor *desc[5] = {TextureDescriptor(layout.width[0], layout.height[0], 4, 5),
+        TextureDescriptor(layout.width[1], layout.height[1], 8, 4),
+        TextureDescriptor(session.width, session.height, 1, 1),
+        TextureDescriptor(session.width / 2, session.height / 2, 1, 1),
+        TextureDescriptor(session.width / 2, session.height / 2, 1, 1)};
     if (!AllocateHeaps(pool, desc, error)) return nil;
     MLPyrowaveMetalDecoder *decoder = [[self alloc] initWithPool:pool];
     if (!decoder) return Fail(error, @"Decoder object allocation failed");

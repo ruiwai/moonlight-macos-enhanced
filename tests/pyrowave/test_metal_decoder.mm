@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Synthetic coordinator fixture smoke, NOT encoder conformance/pixel correctness.
 #import "MLPyrowaveMetalDecoder.h"
+#include "MLPyrowavePresentationBudget.h"
 #include "MLPyrowaveReceiver.hpp"
 #include <dispatch/dispatch.h>
 #include <array>
@@ -147,6 +148,25 @@ static void hardwareTests(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q)
     invalid(nil, q, config(), constantClock, @"queue/device mismatch");
     auto large = config(); large.width = large.height = 16384;
     invalid(k, q, large, constantClock, @"512 MiB"); // Codec-valid, decoder budget rejects.
+    for (uint32_t width : {1920u, 3840u}) {
+        @autoreleasepool { // Release each fixed allocation before the next size.
+            auto requested = config();
+            requested.width = width; requested.height = width == 1920 ? 1080 : 2160;
+            NSError *error = sentinel();
+            auto *decoder = [MLPyrowaveMetalDecoder decoderWithKernels:k commandQueue:q configuration:requested
+                                                               clock:constantClock context:nullptr error:&error];
+            if (!decoder) std::fprintf(stderr, "%ux%u allocation failed: %s\n",
+                requested.width, requested.height, error.description.UTF8String);
+            CHECK(decoder && error == nil);
+            const auto actual = decoder.configuration;
+            CHECK(actual.width == requested.width && actual.height == requested.height);
+            CHECK(actual.maxPacketSize == requested.maxPacketSize && actual.generation == requested.generation);
+            CHECK(actual.range == requested.range && actual.siting == requested.siting);
+            CHECK(decoder.sessionAllocationBytes > 0 &&
+                  decoder.sessionAllocationBytes <= MLPyrowaveSessionAllocationCap);
+            [decoder stop];
+        }
+    }
     uint64_t now = 100; // Borrowed context outlives both decoder autorelease pools.
     auto *frame = makeFrame(1);
     auto rejected = std::make_shared<CompletionState>();
