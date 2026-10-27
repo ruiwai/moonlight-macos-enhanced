@@ -227,3 +227,18 @@ The two production units have explicit Common Xcode membership; Apple-only tests
 are not app sources; no PBX change is needed for this repin. Historical `a8a647d`
 CI was all green with `65f43ca`; parent baseline `6e97b2f` subsequently passed all three workflows (PyroWave, Input 12/12 CTests, macOS app build/draft), compiling both Common units once (`/tmp/pyrowave-6e97b2f-404017*-reviewed.log`). New-pin parent CI remains pending. The app still cannot opt in: no actual callback or active
 coordinator, actual-device preflight, Metal decoding or presentation integration.
+
+## Metal decoder synthetic smoke
+
+`test_metal_decoder.mm` links the actual decoder, kernels, coordinator, codec/receiver
+and explicit existing C objects in an independent fatal-ASan/UBSan CI step (3 minutes).
+CPU factory-invalid checks precede device detection; unsupported macOS 13/Apple7
+hardware returns 77, visibly skipped in the summary. Supported factory/submit failures fail.
+A minimal copied coordinator fixture produces an immutable validated sparse 128x128 frame.
+Checks cover resource creation/error clearing, 16384-square budget rejection, nil inputs,
+generation mismatch, presentation refusal/no completion, submission/successful bounded
+completion and reuse, exact deadline expiry, permanent clock-regression stop and idempotent stop.
+Presentation blits all three correctly shaped R8Unorm planes to a shared buffer with
+256-byte rows; it never retains planes/command buffers or reenters decoder controls.
+This is synthetic dispatch/lifetime smoke, NOT pixel correctness, Metal validation,
+real encoder conformance, deterministic Busy coverage, streaming or feature readiness.
