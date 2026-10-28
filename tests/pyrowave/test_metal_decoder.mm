@@ -106,8 +106,8 @@ static MLPyrowaveFrame *makeFrame(uint64_t generation)
     CHECK(frame && frame.generation == generation && ![coordinator tryTakeFrame]);
     const auto *v = [frame validatedFrame]; CHECK(v && v->codec);
     const auto &f = *v->codec;
-    CHECK(f.payloadSize() == 24 && f.bytes().size() == 40 && f.offsets().size() == 51);
-    CHECK(std::memcmp(f.bytes().data(), codec.data(), codec.size()) == 0 && f.offsets()[0] == 8);
+    CHECK(f.payloadSize() == 24 && f.bytes().size() == 40 && f.wordOffsets().size() == 51);
+    CHECK(std::memcmp(f.bytes().data(), codec.data(), codec.size()) == 0 && f.wordOffsets()[0] == 2);
     CHECK(f.frameInfo().firstReceiveUs == 100 && f.frameInfo().deadlineUs == 100100);
     CHECK(f.frameInfo().metadata.hasHostProcessingLatency);
     CHECK(f.frameInfo().metadata.hostProcessingLatency == 0x1234);

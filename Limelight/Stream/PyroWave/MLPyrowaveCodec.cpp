@@ -187,7 +187,7 @@ bool validPayload(const uint8_t *record, size_t size, uint16_t ballot)
 }
 
 bool scanRecords(const uint8_t *input, size_t length,
-                 const std::vector<uint16_t> &masks, std::vector<uint32_t> &offsets)
+                 const std::vector<uint16_t> &masks, std::vector<uint32_t> &wordOffsets)
 {
     const uint32_t sequence = (read32(input) >> 28) & 7;
     const uint32_t total = read32(input + 4) & 0xffffff;
@@ -210,16 +210,17 @@ bool scanRecords(const uint8_t *input, size_t length,
         const uint32_t index = w1 >> 8;
         const uint16_t ballot = uint16_t(w0);
         // Encoder encode_quant asserts exponent 0..20 => codes 0..167.
-        if (index >= offsets.size() || (w1 & 255) > 167 ||
+        if (index >= wordOffsets.size() || (w1 & 255) > 167 ||
             (ballot & ~masks[index]) != 0 || !validPayload(record, size, ballot))
             return false;
-        const uint32_t previous = offsets[index];
+        const uint32_t previous = wordOffsets[index];
         if (previous != UINT32_MAX) {
-            const size_t previousSize = ((read32(input + previous) >> 16) & 0xfff) * 4;
-            if (previousSize != size || std::memcmp(input + previous, record, size) != 0)
+            const size_t previousByteOffset = size_t(previous) * 4;
+            const size_t previousSize = ((read32(input + previousByteOffset) >> 16) & 0xfff) * 4;
+            if (previousSize != size || std::memcmp(input + previousByteOffset, record, size) != 0)
                 return false;
         } else {
-            offsets[index] = uint32_t(cursor); // Input cap makes narrowing safe.
+            wordOffsets[index] = uint32_t(cursor / 4); // Aligned progress; input cap bounds narrowing.
             ++unique;
         }
         cursor += size; // At least 8; bounded by remaining above.
@@ -229,9 +230,9 @@ bool scanRecords(const uint8_t *input, size_t length,
 } // namespace
 
 ValidatedCodecFrame::ValidatedCodecFrame(CodecBytes &&bytes,
-    std::vector<uint32_t> &&offsets, const CodecSession &session,
+    std::vector<uint32_t> &&wordOffsets, const CodecSession &session,
     const MLPyrowaveFrameInfo &info)
-    : bytes_(std::move(bytes)), offsets_(std::move(offsets)), session_(session), info_(info)
+    : bytes_(std::move(bytes)), wordOffsets_(std::move(wordOffsets)), session_(session), info_(info)
 {
 }
 

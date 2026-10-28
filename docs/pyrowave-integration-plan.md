@@ -89,7 +89,7 @@ Stop/reconfigure generations serialize with admission and completion publication
 Inject the actual renderer device and queue: current symbols are `VideoDecoderRenderer.m:_device` and `_commandQueue`, **not** `_metalDevice`.
 Do not create a generic default device/queue. Preflight the injected device, requested layout, texture usages and all compiled pipelines.
 Compile the exact pinned dequant + FP32 IDWT kernels with notices preserved; do not feed untrusted input through the unsafe upstream Metal parser/API.
-Use validated offsets only: they are **BYTE offsets** into the full original frame. Divide valid offsets by four only for an unchanged whole-frame upload.
+Use validated `wordOffsets()` only: they are **4-byte WORD offsets** into the full original frame, ready for an unchanged whole-frame upload without conversion.
 Preserve `UINT32_MAX` absent entries and the 16 initialized zero guard bytes; validate alignment/read bounds, payload base and sparse/zero-band initialization.
 Use at most **four leases + one waiting frame**, **512 MiB total session-owned CPU/GPU allocation accounting**, including reconfiguration overlap (current cap; v1 originally used 256 MiB).
 Charge the reassembly wrapper's conservative **128 MiB upper bound**, codec validation peak **32 MiB**, waiting ownership, upload/offset buffers, intermediates and outputs;

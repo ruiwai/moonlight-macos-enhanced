@@ -29,6 +29,13 @@ only so far; standalone draw-gate C11/C++14 checks passed with ASan/UBSan.
   into overwrite storage and zeros its 16 guards before publication.
   Cached masks, offsets and vector capacities stay budgeted; OR/popcount counts
   pooled significant/sign bits without changing duplicate/validation semantics.
+- The record scanner writes one native GPU-ready uint32_t `wordOffsets()` table
+  (4-byte words; UINT32_MAX absent) directly while its cursor stays in bytes.
+  Duplicate checks convert prior word entries to bytes for read32/exact memcmp.
+  Metal validates the exact layout count and byte bounds, then memcpy's the table;
+  no second table or post-validation conversion pass. Wire, shaders, precision and
+  ownership are unchanged. Changed codec/caller tests are NOT EXECUTED, awaiting CI;
+  portable draw-gate/stats checks do not prove codec/GPU correctness or speedup.
 - Dequant batches independent bands per component/level using grid.z=3 (levels
   0..3) or 4 (level 4): 42 dispatches become 13. IDWT remains 13 dispatches with
   cached pipeline bindings/shared push bytes once per level. FP32 and barriers
@@ -62,7 +69,7 @@ category `pipeline`. Exact signpost names and boundaries:
 | --- | --- |
 | `Receive` | Synchronous peer receive/reassembly/validation, then app lock reacquisition, stats and scheduling tail; not pure parser time or initial app-lock wait. Fields: frameId, epoch, size; end result. |
 | `Drawable` | `currentDrawable` acquisition only; valid flag. Tagged by epoch, **not frameId**; do not join it to a frame by invented identity. |
-| `Upload` | CPU payload memcpy/guard initialization and byte-to-word offset conversion; frameId/generation. Not a GPU transfer-duration measurement. |
+| `Upload` | CPU payload memcpy/guard initialization and GPU-ready word-offset table memcpy; frameId/generation. Not a GPU transfer-duration measurement. |
 | `Encode` | CPU compute-command encoding (dequant + IDWT) only, not upload, render encoding, commit or GPU execution; frameId/generation, success. |
 | `Submitted` | Event immediately before commit after final deadline check; frameId/generation. Not presentation acknowledgment. |
 | `GPUComplete` | Completion callback event; frameId/generation/success. gpuSeconds appears only for valid GPU timestamps. GPU end minus start covers the entire command buffer, including render, not decode alone. |
@@ -153,8 +160,8 @@ All filenames below refer to the native path above unless explicitly qualified.
    `MLPyrowaveReceiver.cpp` constructs overwrite-initialized payload+16-byte storage;
    complete exact-length CopyFrame writes payload before ValidateOwned reads it,
    zeros only the 16 guards on success and moves ownership without another copy.
-   `MLPyrowaveMetalDecoder.mm` submit memcpy's into shared storage and converts
-   byte offsets to word offsets again. A bounded persistent arena/direct-to-shared
+   `MLPyrowaveMetalDecoder.mm` submit memcpy's payload and the native word-offset
+   table into shared storage. A bounded persistent arena/direct-to-shared
    validated-ownership experiment could eliminate work. Preserve byte-identical
    and conflicting duplicate semantics, initialized guards, expiry/replay,
    immutable frames and last-GPU-reader lifetime. Never substitute a collision-

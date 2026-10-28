@@ -121,12 +121,12 @@ static void checkOwned(Bytes bytes, const BlockLayout &layout, const Records &re
     CHECK(std::all_of(result->bytes().begin() + bytes.size(), result->bytes().end(),
                       [](uint8_t b) { return b == 0; }));
     std::vector<uint32_t> expected(layout.block_32x32_to_8x8_mapping.size(), UINT32_MAX);
-    uint32_t offset = 8; // Native offsets are BYTES, including initial sequence.
+    uint32_t offset = 8; // Byte cursor includes initial sequence; table uses WORDS.
     for (const auto &r : records) {
         CHECK(expected[r.first] == UINT32_MAX);
-        expected[r.first] = offset; offset += uint32_t(r.second.size());
+        expected[r.first] = offset / 4; offset += uint32_t(r.second.size());
     }
-    CHECK(offset == bytes.size() && result->offsets() == expected);
+    CHECK(offset == bytes.size() && result->wordOffsets() == expected);
     const Bytes original = bytes;
     std::fill(bytes.begin(), bytes.end(), 0); Bytes().swap(bytes);
     info = {}; s.width = 0;

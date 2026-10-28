@@ -87,7 +87,7 @@ static std::unique_ptr<const ValidatedCodecFrame> validate(const Bytes &b,
     CHECK(bool(owned) == bool(borrowed)); // All existing malformed/duplicate fixtures too.
     if (owned) {
         CHECK(owned->bytes() == borrowed->bytes());
-        CHECK(owned->offsets() == borrowed->offsets());
+        CHECK(owned->wordOffsets() == borrowed->wordOffsets());
     }
     return borrowed;
 }
@@ -137,7 +137,7 @@ static void testOwnedTransferAndCache()
     auto second = validator->ValidateOwned(std::move(bytes), zero.size(), info);
     CHECK(second && second->frameInfo().frameId == info.frameId);
     CHECK(!second->frameInfo().metadata.hasHostProcessingLatency);
-    CHECK(std::all_of(second->offsets().begin(), second->offsets().end(),
+    CHECK(std::all_of(second->wordOffsets().begin(), second->wordOffsets().end(),
         [](uint32_t offset) { return offset == UINT32_MAX; }));
     bytes = good; bytes.push_back(0); // Reject after a valid record was scanned.
     const size_t badLength = bytes.size(); bytes.resize(badLength + 16, 0xa5);
@@ -145,7 +145,7 @@ static void testOwnedTransferAndCache()
     CHECK(!validator->ValidateOwned(std::move(bytes), badLength, envelope()));
     CHECK(bytes == unchanged);
     validator.reset();
-    CHECK(first->bytes().data() == allocation && first->offsets()[0] == 8);
+    CHECK(first->bytes().data() == allocation && first->wordOffsets()[0] == 2);
     CHECK(first->session().width == 128 && first->frameInfo().frameId == envelope().frameId);
     CHECK(first->frameInfo().metadata.hostProcessingLatency == 65535);
     CHECK(std::equal(good.begin(), good.end(), first->bytes().begin()));
@@ -187,14 +187,14 @@ static void testValidAndOwnership()
                 s.range = range; s.siting = siting;
                 auto zero = validate(sequence(s, 0), s);
                 CHECK(zero && zero->payloadSize() == 8);
-                CHECK(std::all_of(zero->offsets().begin(), zero->offsets().end(),
+                CHECK(std::all_of(zero->wordOffsets().begin(), zero->wordOffsets().end(),
                     [](uint32_t offset) { return offset == UINT32_MAX; }));
                 Bytes b = frame(s);
                 auto info = envelope();
                 auto result = validate(b, s, info);
                 CHECK(result && result->payloadSize() == b.size());
-                CHECK(result->offsets().size() == (dimension == 130 ? 93 : 51));
-                CHECK(result->offsets()[0] == 8 && result->offsets()[1] == UINT32_MAX);
+                CHECK(result->wordOffsets().size() == (dimension == 130 ? 93 : 51));
+                CHECK(result->wordOffsets()[0] == 2 && result->wordOffsets()[1] == UINT32_MAX);
                 CHECK(result->session().range == range && result->session().siting == siting);
                 CHECK(result->session().width == dimension && result->session().height == dimension);
                 CHECK(std::equal(b.begin(), b.end(), result->bytes().begin()));
@@ -275,7 +275,7 @@ static void testDuplicatesAndRecordHeaders()
 {
     const auto s = session();
     Bytes b = frame(s); append(b, record());
-    auto same = validate(b); CHECK(same && same->offsets()[0] == 8);
+    auto same = validate(b); CHECK(same && same->wordOffsets()[0] == 2);
     for (unsigned words : {0u, 1u, 2u, 3u, 5u, 4095u}) {
         Bytes bad = frame(s); append(bad, record(0, 0, 1, words)); CHECK(!validate(bad));
     }
@@ -293,7 +293,28 @@ static void testDuplicatesAndRecordHeaders()
     CHECK(!validate(frame(s, record(0, 0, 0, 3))));
     // Header-only record at last layout slot proves sparse index semantics.
     auto last = validate(frame(s, record(50, 0, 0, 2)));
-    CHECK(last && last->offsets()[50] == 8 && last->offsets()[0] == UINT32_MAX);
+    CHECK(last && last->wordOffsets()[50] == 2 && last->wordOffsets()[0] == UINT32_MAX);
+}
+
+static void testWordOffsetsAndNonFirstDuplicates()
+{
+    Bytes middle = record(3);
+    middle[8] = middle[10] = 0; // Zero control/q0: 12-byte record, including padding.
+    middle.resize(12); put32(middle, 0, 1 | (3u << 16) | (3u << 28));
+    Bytes b = sequence(session(), 3);
+    append(b, record(7)); append(b, middle); append(b, record(50, 0, 0, 2));
+    std::vector<uint32_t> expected(51, UINT32_MAX);
+    expected[7] = 2; expected[3] = 6; expected[50] = 9; // Byte starts 8/24/36.
+    auto result = validate(b);
+    CHECK(result && result->wordOffsets() == expected && result->payloadSize() == 44);
+    append(b, middle); // Identical non-first record: preserve its original offset.
+    result = validate(b);
+    CHECK(result && result->wordOffsets() == expected && result->payloadSize() == 56);
+    for (size_t byte : {size_t(4), size_t(11)}) {
+        Bytes conflict = middle; conflict[byte] ^= 1; // Quant or ignored padding.
+        Bytes bad = b; append(bad, conflict); CHECK(!validate(bad));
+    }
+    append(b, record(3)); CHECK(!validate(b)); // Same index, different valid length.
 }
 
 static void testPayloadAndGeometry()
@@ -345,7 +366,7 @@ static void testPooledSignsAndPlanes()
     CHECK(validate(frame(session(), pooled)));
     Bytes two = sequence(session(), 2); append(two, record()); append(two, pooled);
     auto result = validate(two);
-    CHECK(result && result->offsets()[0] == 8 && result->offsets()[30] == 24);
+    CHECK(result && result->wordOffsets()[0] == 2 && result->wordOffsets()[30] == 6);
     // OR plane bytes, don't count their bits separately: 3 identical planes per
     // subblock give8 significant coefficients total, not24 (would need10 words).
     Bytes planes = record(0, 0, 1, 6);
@@ -371,6 +392,7 @@ int main()
     testSequenceAndIdentity();
     testSessionAndBounds();
     testDuplicatesAndRecordHeaders();
+    testWordOffsetsAndNonFirstDuplicates();
     testPayloadAndGeometry();
     testPooledSignsAndPlanes();
     std::puts("codec synthetic checks passed");

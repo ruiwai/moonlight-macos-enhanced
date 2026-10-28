@@ -91,7 +91,7 @@ static void validate(MLPyrowaveFrame *frame, uint32_t id, uint64_t generation)
     CHECK(std::equal(Codec.begin(), Codec.end(), v->codec->bytes().begin()));
     CHECK(std::all_of(v->codec->bytes().begin() + 24, v->codec->bytes().end(),
                       [](uint8_t b) { return b == 0; }));
-    CHECK(v->codec->offsets().size() == 51 && v->codec->offsets()[0] == 8);
+    CHECK(v->codec->wordOffsets().size() == 51 && v->codec->wordOffsets()[0] == 2);
 }
 static void testFactory()
 {

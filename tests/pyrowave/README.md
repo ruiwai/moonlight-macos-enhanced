@@ -170,8 +170,11 @@ layout capacity is preflighted with checked uint64 arithmetic before allocation.
 Input+16 zero guards, offsets and session-cached masks (4/2 bytes per slot),
 object sizes/1024-byte bookkeeping must fit 32 MiB, using vector capacities
 (allocation requests, not process RSS).
-Offsets are BYTE offsets to unique record headers; UINT32_MAX is absent. Guard
-bytes are initialized, but shader read safety is not certified. Receiver recovery
+`wordOffsets()` exposes one native GPU-ready uint32_t table of 4-byte WORD offsets
+to unique record headers; UINT32_MAX is absent. The byte-cursor scanner writes it
+directly; duplicate checks convert prior entries back to bytes for exact comparison.
+Metal uploads this same table with one memcpy, without a conversion pass or second
+table. Guard bytes are initialized, but shader read safety is not certified. Receiver recovery
 copies once into owned scratch; `ValidateOwned` validates then moves it without
 a second payload copy. C++14 stateless allocator-backed `CodecBytes` avoids payload
 preclear: complete exact-length copy writes payload before validation, then the
@@ -197,7 +200,10 @@ not required: unique transmitted count must equal the sequence's declared count.
 Algorithm provenance: Foundation codec `cc91cbf6363721d19d135d05ca8e3d8665ea6afd`,
 MIT AND GPL-3.0-only; notices are retained in the new source. These synthetic checks do NOT establish encoder
 conformance, pixel accuracy, GPU validity, interoperability, or feature readiness.
-Codec CI passed in run 40337167846; local evidence remains lint only.
+Historical codec CI passed in run 40337167846, not this word-offset refinement.
+Changed codec/caller/packetizer tests are NOT EXECUTED, awaiting CI; the focused
+regression covers mixed lengths/indices, non-first duplicates and absent sentinels.
+Local portable draw-gate/stats checks do not establish codec or GPU acceptance.
 
 ## Pinned CPU packetizer oracle /v1
 
@@ -218,7 +224,7 @@ metadata initializes every slot, uses word offsets and provides a readable align
 sequence5 dummy header even at zero count. Packet offsets/sizes/exhaustion and
 boundary16/24 split/concatenate cover separated sparse slots including the last.
 These packets are not PYRF frames; only complete pure bytes reach the validator.
-Checks cover owned byte identity, full envelope identity/timing/latency, byte-offset
+Checks cover owned byte identity, full envelope identity/timing/latency, word-offset
 tables/absent slots, zero guards, and capacities51/51/93/3261/393216 for
 2x2/128x128/130x130/1920x1080/16384x16384 sequence-only frames. Each distinct
 mapping geometry in 2/130/1920 layouts accepts its full legal ballot, with pooled

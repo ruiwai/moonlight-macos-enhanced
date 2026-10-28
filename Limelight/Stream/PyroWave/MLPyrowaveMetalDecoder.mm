@@ -266,11 +266,11 @@ bool ValidInput(MLPyrowaveMetalPool *p, MLPyrowaveFrame *frame)
     const auto *received = [frame validatedFrame];
     if (!received || !received->codec) return false;
     const auto &f = *received->codec;
-    if (!SessionMatches(f.session(), p->session) || f.offsets().size() != p->layout.count ||
+    if (!SessionMatches(f.session(), p->session) || f.wordOffsets().size() != p->layout.count ||
         f.payloadSize() < 8 || f.payloadSize() > 16 * MiB ||
         f.bytes().size() != f.payloadSize() + 16) return false;
-    for (uint32_t offset : f.offsets())
-        if (offset != UINT32_MAX && ((offset & 3) || uint64_t(offset) + 8 > f.payloadSize())) return false;
+    for (uint32_t wordOffset : f.wordOffsets())
+        if (wordOffset != UINT32_MAX && uint64_t(wordOffset) * 4 + 8 > f.payloadSize()) return false;
     return true;
 }
 bool EncodeDequant(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
@@ -414,9 +414,7 @@ bool EncodeIDWT(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
         std::memcpy(p->payload.contents, f.bytes().data(), f.bytes().size());
         cmd.label = @"PyroWave decode and present";
         std::memset(static_cast<uint8_t *>(p->payload.contents) + f.payloadSize(), 0, 16);
-        auto *words = static_cast<uint32_t *>(p->offsets.contents);
-        for (size_t i = 0; i < f.offsets().size(); ++i)
-            words[i] = f.offsets()[i] == UINT32_MAX ? UINT32_MAX : f.offsets()[i] / 4;
+        std::memcpy(p->offsets.contents, f.wordOffsets().data(), f.wordOffsets().size() * sizeof(uint32_t));
         if (trace) os_signpost_interval_end(log, upload, "Upload");
         const os_signpost_id_t encode = trace ? os_signpost_id_generate(log) : OS_SIGNPOST_ID_INVALID;
         if (trace) os_signpost_interval_begin(log, encode, "Encode", "frameId=%u generation=%llu",

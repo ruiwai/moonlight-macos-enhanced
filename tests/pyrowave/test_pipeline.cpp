@@ -151,8 +151,8 @@ static void testRecoveryOwnership()
     c->bytes.fill(0); c->info = {}; c.reset();
     for (auto &p : s.packets) p.bytes.fill(0);
     checkOwned(*v, Codec.data(), Codec.size(), info);
-    CHECK(v->offsets().size() == 51 && v->offsets()[0] == 8);
-    CHECK(std::all_of(v->offsets().begin() + 1, v->offsets().end(),
+    CHECK(v->wordOffsets().size() == 51 && v->wordOffsets()[0] == 2);
+    CHECK(std::all_of(v->wordOffsets().begin() + 1, v->wordOffsets().end(),
                       [](uint32_t o) { return o == UINT32_MAX; }));
 }
 

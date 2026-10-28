@@ -58,7 +58,7 @@ class ValidatedCodecFrame final {
 public:
     ~ValidatedCodecFrame() = default;
     const CodecBytes &bytes() const { return bytes_; }
-    const std::vector<uint32_t> &offsets() const { return offsets_; }
+    const std::vector<uint32_t> &wordOffsets() const { return wordOffsets_; }
     const CodecSession &session() const { return session_; }
     const MLPyrowaveFrameInfo &frameInfo() const { return info_; }
     size_t payloadSize() const { return bytes_.size() - 16; }
@@ -67,12 +67,12 @@ private:
     friend class CodecValidator;
     friend std::unique_ptr<const ValidatedCodecFrame> ValidateCodecFrame(
         const uint8_t *, size_t, const CodecSession &, const MLPyrowaveFrameInfo &);
-    ValidatedCodecFrame(CodecBytes &&bytes, std::vector<uint32_t> &&offsets,
+    ValidatedCodecFrame(CodecBytes &&bytes, std::vector<uint32_t> &&wordOffsets,
                         const CodecSession &session, const MLPyrowaveFrameInfo &info);
     ValidatedCodecFrame(const ValidatedCodecFrame &) = delete;
     ValidatedCodecFrame &operator=(const ValidatedCodecFrame &) = delete;
     CodecBytes bytes_; // Full input, then 16 initialized zero guard bytes.
-    std::vector<uint32_t> offsets_; // BYTE offsets; UINT32_MAX means absent.
+    std::vector<uint32_t> wordOffsets_; // 4-byte WORD offsets; UINT32_MAX means absent.
     CodecSession session_;
     MLPyrowaveFrameInfo info_; // Full envelope ID, RTP time, receive/deadline, metadata.
 };
