@@ -154,9 +154,9 @@ cover counts, ownership, reuse/growth, context/arena failure injection, retireme
 watermarks and copy output; execution of this patch is pending. Common allocation
 fault paths still are not injected. Historical strict reassembly CI run 40334474521
 is not evidence for this patch. Payload preclear is removed by the overwrite byte
-vector; 16 zero guards are retained. Reassembly copy, shared GPU upload copy and
-Common allocations remain: no zero-copy, direct-to-Metal,
-precision change or measured speedup. Local lint is not test execution.
+vector; 16 zero guards are retained. Reassembly copy and Common allocations remain;
+pooled payloads can now alias Metal storage, with shared-upload-copy fallback.
+No end-to-end zero-copy, precision change or speedup is claimed. Local lint is not execution.
 
 Outside the standalone portable checks above, local validation is lint only;
 do not build or execute the golden/codec/receiver/Metal tests locally:
@@ -192,7 +192,7 @@ preclear: complete exact-length copy writes payload before validation, then the
 16 guards are zeroed before publication. Count construction/resize without a
 value requires explicit writes before reads; explicit-value construction still fills.
 The borrowed-input wrapper validates first, copies payload into overwrite storage,
-then zeros guards. No direct shared-Metal storage or measured speedup is claimed.
+then zeros guards. Metal may alias pooled storage; no measured speedup is claimed.
 Immutable results snapshot envelope ID/timestamp/timing/metadata; failures publish
 nothing. Masks are cached per session; payload sign counts use OR/popcount.
 No clock comparison is performed in the codec; callers own expiry decisions.
@@ -309,7 +309,15 @@ No GPU skip path, encrypted network, sockets, live app wiring or enablement clai
 and explicit existing C objects in an independent fatal-ASan/UBSan CI step (3 minutes).
 CPU factory-invalid checks precede device detection; unsupported macOS 13/Apple7
 hardware returns 77, visibly skipped in the summary. Supported factory/submit failures fail.
-A minimal copied coordinator fixture produces an immutable validated sparse 128x128 frame.
+A minimal coordinator fixture produces an immutable pool-backed sparse 128x128 frame.
+The real internal alias helper checks pointer identity, page-rounded length, zero
+guards, weak frame survival after caller release/autorelease drain, and lease/pool
+release with slot reuse. Nil device/frame rejects; no unsupported device mocks.
+Default/non-pooled vectors must use copy fallback. Alias resources retain the frame
+and pool until retirement; completion does not capture frame/UI. All three slots
+plus fixed fallback resources remain conservatively budgeted. Upload end includes
+`aliased=%d`. These new lifetime checks and pooled decoder GPU smoke are CI-only,
+NOT RUN locally; macOS compilation and GPU output remain unverified, not independent image proof.
 Checks cover resource creation/error clearing, 16384-square budget rejection, nil inputs,
 generation mismatch, presentation refusal/no completion, submission/successful bounded
 completion and reuse, exact deadline expiry, permanent clock-regression stop and idempotent stop.

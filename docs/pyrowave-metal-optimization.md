@@ -17,8 +17,8 @@ only so far; standalone draw-gate C11/C++14 checks passed with ASan/UBSan.
   growth frees before allocating, with no overlap. Common allocations remain.
   CI-only whitebox counting/context+arena fault injection is pending execution;
   Common allocation fault paths are not injected. This is not zero-copy or a
-  speedup claim: reassembly copy and shared GPU upload copy remain.
-  No direct-to-Metal ownership or precision change is included.
+  speedup claim: reassembly copy remains, with shared-upload-copy fallback.
+  Pooled payload aliasing below changes ownership, not precision.
 - Receiver recovery copies into owned payload+16-byte-guard scratch once.
   `CodecBytes`, a C++14 optionally pooled overwrite byte vector, removes
   payload preclear; complete exact-length copy initializes payload before validation.
@@ -38,7 +38,16 @@ only so far; standalone draw-gate C11/C++14 checks passed with ASan/UBSan.
   +1 MiB bookkeeping +2*(Payload+offsetBytes+4096). Double counting default CPU
   inputs/leases is deliberately conservative; the 512 MiB cap is unchanged.
   Standalone pool local sanitizer tests are allowed; golden/codec/receiver/Metal
-  execution stays CI-only. Upload copy remains; no performance gain is claimed.
+  execution stays CI-only. No performance gain is claimed.
+- On unified-memory devices, validated pooled payloads use a per-submit no-copy
+  shared/tracked Metal buffer after runtime page-alignment/rounded-length checks.
+  Its deallocator block retains the immutable frame/pool, never frees the pointer;
+  normal command-buffer resource retention prevents lease reuse through last read.
+  No alias is cached on decoder/pool; no CPU writes follow validation. Nil alias,
+  including default/non-pooled vectors, uses the unchanged fixed upload fallback.
+  Offsets still memcpy; all three slots and fallback heaps remain budgeted together.
+  Helper pointer/guard/weak-owner/slot-reuse tests and pooled sparse GPU smoke are
+  CI-only, unexecuted locally; macOS compile/lifetime/GPU output remain unverified.
 - The record scanner writes one native GPU-ready uint32_t `wordOffsets()` table
   (4-byte words; UINT32_MAX absent) directly while its cursor stays in bytes.
   Duplicate checks convert prior word entries to bytes for read32/exact memcmp.
@@ -58,7 +67,8 @@ only so far; standalone draw-gate C11/C++14 checks passed with ASan/UBSan.
   completion, using the receive serial to avoid a lost wake if it already ended.
 - Draw notifications, GPU completion and presented callbacks weakly capture app/
   renderer owners, with epoch checks. GPU retirement retains private resources
-  through the command buffer's last reader, not a CPU frame or UI owner.
+  through the command buffer's last reader. Aliased resources also retain their
+  immutable CPU frame/pool; completion itself does not capture a frame/UI owner.
 - Opt-in signposts expose CPU stages and command-buffer completion (below).
 - `kernelsWithDevice:error:` serializes under
   `@synchronized([MLPyrowaveMetalKernels class])`. One strong process-lifetime
@@ -79,7 +89,7 @@ category `pipeline`. Exact signpost names and boundaries:
 | --- | --- |
 | `Receive` | Synchronous peer receive/reassembly/validation, then app lock reacquisition, stats and scheduling tail; not pure parser time or initial app-lock wait. Fields: frameId, epoch, size; end result. |
 | `Drawable` | `currentDrawable` acquisition only; valid flag. Tagged by epoch, **not frameId**; do not join it to a frame by invented identity. |
-| `Upload` | CPU payload memcpy/guard initialization and GPU-ready word-offset table memcpy; frameId/generation. Not a GPU transfer-duration measurement. |
+| `Upload` | No-copy alias creation or fallback payload memcpy/guard initialization, plus word-offset memcpy; frameId/generation, end `aliased=%d`. Not GPU transfer duration. |
 | `Encode` | CPU compute-command encoding (dequant + IDWT) only, not upload, render encoding, commit or GPU execution; frameId/generation, success. |
 | `Submitted` | Event immediately before commit after final deadline check; frameId/generation. Not presentation acknowledgment. |
 | `GPUComplete` | Completion callback event; frameId/generation/success. gpuSeconds appears only for valid GPU timestamps. GPU end minus start covers the entire command buffer, including render, not decode alone. |
@@ -120,7 +130,7 @@ No measurements were collected here.
 
 - Persistent upload arena plus direct reassembly ownership: preserve identical/
   conflicting duplicate semantics, retirement/deadlines and peak-capacity budgets;
-  the current shared GPU upload buffers still receive a CPU payload copy.
+  pooled aliasing removes only the payload upload copy, not reassembly/offset copies.
 - Multi-slot GPU overlap: define bounded last-reader leases for upload, pyramid
   and output resources; measure latency/backpressure, not just throughput.
 - FP16 storage or arithmetic: require numeric goldens/error bounds from the full
@@ -170,9 +180,9 @@ All filenames below refer to the native path above unless explicitly qualified.
    `MLPyrowaveReceiver.cpp` constructs overwrite-initialized payload+16-byte storage;
    complete exact-length CopyFrame writes payload before ValidateOwned reads it,
    zeros only the 16 guards on success and moves ownership without another copy.
-   `MLPyrowaveMetalDecoder.mm` submit memcpy's payload and the native word-offset
-   table into shared storage. A bounded persistent arena/direct-to-shared
-   validated-ownership experiment could eliminate work. Preserve byte-identical
+   `MLPyrowaveMetalDecoder.mm` aliases pooled payloads or memcpy's fallback input;
+   the native word-offset table still copies. A bounded persistent arena/direct
+   reassembly-ownership experiment could eliminate more work. Preserve byte-identical
    and conflicting duplicate semantics, initialized guards, expiry/replay,
    immutable frames and last-GPU-reader lifetime. Never substitute a collision-
    prone hash for duplicate byte checks, skip validation, or overwrite an in-flight

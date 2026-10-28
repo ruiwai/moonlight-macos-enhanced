@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT AND GPL-3.0-only
 // Host dispatch/view algorithms adapted from the pin in pyrowave-metal-provenance.md.
 #import "MLPyrowaveMetalDecoder.h"
+#import "MLPyrowaveMetalPayload.h"
 #include "MLPyrowavePresentationBudget.h"
 #include "MLPyrowaveReceiver.hpp"
 #include <os/lock.h>
@@ -275,7 +276,7 @@ bool ValidInput(MLPyrowaveMetalPool *p, MLPyrowaveFrame *frame)
         if (wordOffset != UINT32_MAX && uint64_t(wordOffset) * 4 + 8 > f.payloadSize()) return false;
     return true;
 }
-bool EncodeDequant(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
+bool EncodeDequant(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd, id<MTLBuffer> payload)
 {
     // Dispatches write disjoint component slices/mips; input buffers are read-only.
     // The encoder boundary and tracked heap resources preserve the dequant -> IDWT dependency.
@@ -283,7 +284,7 @@ bool EncodeDequant(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
     if (!enc) return false;
     enc.label = @"PyroWave dequant";
     [enc setComputePipelineState:p->kernels.dequant];
-    [enc setBuffer:p->payload offset:0 atIndex:0];
+    [enc setBuffer:payload offset:0 atIndex:0];
     [enc setBuffer:p->offsets offset:0 atIndex:2];
     for (unsigned l = 0; l < 5; ++l) {
         for (unsigned c = 0; c < 3; ++c) {
@@ -413,15 +414,20 @@ bool EncodeIDWT(MLPyrowaveMetalPool *p, id<MTLCommandBuffer> cmd)
         const os_signpost_id_t upload = trace ? os_signpost_id_generate(log) : OS_SIGNPOST_ID_INVALID;
         if (trace) os_signpost_interval_begin(log, upload, "Upload", "frameId=%u generation=%llu",
             frameId, (unsigned long long)generation);
-        std::memcpy(p->payload.contents, f.bytes().data(), f.bytes().size());
+        id<MTLBuffer> payload = MLPyrowaveAliasPayload(p->kernels.device, frame);
+        const bool aliased = payload != nil;
+        if (!payload) {
+            payload = p->payload;
+            std::memcpy(payload.contents, f.bytes().data(), f.bytes().size());
+            std::memset(static_cast<uint8_t *>(payload.contents) + f.payloadSize(), 0, 16);
+        } // No alias cached on decoder/pool; normal command-buffer resource retention.
         cmd.label = @"PyroWave decode and present";
-        std::memset(static_cast<uint8_t *>(p->payload.contents) + f.payloadSize(), 0, 16);
         std::memcpy(p->offsets.contents, f.wordOffsets().data(), f.wordOffsets().size() * sizeof(uint32_t));
-        if (trace) os_signpost_interval_end(log, upload, "Upload");
+        if (trace) os_signpost_interval_end(log, upload, "Upload", "aliased=%d", aliased);
         const os_signpost_id_t encode = trace ? os_signpost_id_generate(log) : OS_SIGNPOST_ID_INVALID;
         if (trace) os_signpost_interval_begin(log, encode, "Encode", "frameId=%u generation=%llu",
             frameId, (unsigned long long)generation);
-        const bool encoded = EncodeDequant(p, cmd) && EncodeIDWT(p, cmd);
+        const bool encoded = EncodeDequant(p, cmd, payload) && EncodeIDWT(p, cmd);
         if (trace) os_signpost_interval_end(log, encode, "Encode", "success=%d", encoded);
         if (!encoded) {
             p->busy = false; p->stopped = true;

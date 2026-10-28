@@ -89,7 +89,15 @@ Stop/reconfigure generations serialize with admission and completion publication
 Inject the actual renderer device and queue: current symbols are `VideoDecoderRenderer.m:_device` and `_commandQueue`, **not** `_metalDevice`.
 Do not create a generic default device/queue. Preflight the injected device, requested layout, texture usages and all compiled pipelines.
 Compile the exact pinned dequant + FP32 IDWT kernels with notices preserved; do not feed untrusted input through the unsafe upstream Metal parser/API.
-Use validated `wordOffsets()` only: they are **4-byte WORD offsets** into the full original frame, ready for an unchanged whole-frame upload without conversion.
+Use validated `wordOffsets()` only: **4-byte WORD offsets** into the full original frame, ready for whole-frame alias/fallback upload without conversion.
+Implemented step3 aliases only validated pool-backed payloads on unified memory,
+after runtime page alignment/overflow-safe rounding and slot/device bounds checks.
+The Metal resource retains immutable frame/pool until retirement; normal command
+buffers retain bound resources, with no completion frame/UI capture or CPU writes.
+Default vectors/alias failures use the unchanged fixed fallback copy; offsets copy.
+Step2 still reserves all three pool slots plus fallback heaps conservatively.
+No-copy lifetime tests and pooled sparse GPU smoke await CI, not independent image
+proof; macOS compile and GPU output remain unverified. No speedup is claimed.
 Preserve `UINT32_MAX` absent entries and the 16 initialized zero guard bytes; validate alignment/read bounds, payload base and sparse/zero-band initialization.
 Use at most **four leases + one waiting frame**, **512 MiB total session-owned CPU/GPU allocation accounting**, including reconfiguration overlap (current cap; v1 originally used 256 MiB).
 Charge the reassembly wrapper's conservative **128 MiB upper bound**, codec validation peak **32 MiB**, waiting ownership, upload/offset buffers, intermediates and outputs;

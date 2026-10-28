@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Synthetic coordinator smoke + analytic-zero dequant oracle, NOT encoder/full pixel correctness.
 #import "MLPyrowaveMetalDecoder.h"
+#import "MLPyrowaveMetalPayload.h"
 #include "MLPyrowavePresentationBudget.h"
 #include "MLPyrowaveReceiver.hpp"
 #include <dispatch/dispatch.h>
@@ -114,6 +115,56 @@ static MLPyrowaveFrame *makeFrame(uint64_t generation)
     CHECK(f.frameInfo().frameId == 0x12345678 && f.frameInfo().rtpTimestamp == 0x87654321);
     CHECK(v->outerRtpTimestamp == 0xabcdef01 && v->presentationTimeUs == 9000);
     return frame;
+}
+
+static void payloadAliasTests(id<MTLDevice> device)
+{
+    CHECK(!MLPyrowaveAliasPayload(nil, nil));
+    CHECK(!MLPyrowaveAliasPayload(device, nil));
+    __weak MLPyrowaveFrame *weakFrame = nil;
+    __attribute__((objc_precise_lifetime)) id<MTLBuffer> alias = nil;
+    std::shared_ptr<MLPyrowave::PayloadPool> pool;
+    std::weak_ptr<MLPyrowave::PayloadPool> weakPool;
+    const void *pointer = nullptr;
+    @autoreleasepool {
+        MLPyrowaveFrame *frame = makeFrame(1);
+        weakFrame = frame;
+        const auto &f = *[frame validatedFrame]->codec;
+        pool = f.bytes().get_allocator().pool; CHECK(pool);
+        weakPool = pool;
+        pointer = f.bytes().data();
+        CHECK(!MLPyrowaveAliasPayload(nil, frame));
+        alias = MLPyrowaveAliasPayload(device, frame);
+        CHECK(alias && alias.contents == pointer && alias.device == device);
+        CHECK(alias.storageMode == MTLStorageModeShared);
+        const long pageSize = sysconf(_SC_PAGESIZE); CHECK(pageSize > 0);
+        CHECK(reinterpret_cast<uintptr_t>(pointer) % size_t(pageSize) == 0);
+        CHECK(alias.length == ((f.bytes().size() + pageSize - 1) / pageSize) * pageSize);
+        CHECK(alias.length <= MLPyrowave::PayloadPool::SlotBytes);
+        const auto *bytes = static_cast<const uint8_t *>(alias.contents);
+        CHECK(std::memcmp(bytes, f.bytes().data(), f.payloadSize()) == 0);
+        for (size_t i = 0; i < 16; ++i) CHECK(bytes[f.payloadSize() + i] == 0);
+        frame = nil;
+    }
+    pool.reset(); // Prove that the alias alone also preserves the pool owner.
+    @autoreleasepool {
+        CHECK(weakFrame && !weakPool.expired()); // Caller and its autoreleases gone.
+        pool = weakPool.lock(); CHECK(pool);
+        void *other[2] = {pool->acquire(40), pool->acquire(40)};
+        CHECK(other[0] != pointer && other[1] != pointer);
+        bool exhausted = false;
+        try { pool->acquire(40); } catch (const std::bad_alloc &) { exhausted = true; }
+        CHECK(exhausted); // Alias still holds the third lease.
+        for (void *p : other) pool->release(p);
+        alias = nil;
+    }
+    CHECK(!weakFrame);
+    void *reused = pool->acquire(40);
+    CHECK(reused == pointer); // First slot returned only after resource release.
+    pool->release(reused);
+    pool.reset();
+    CHECK(weakPool.expired());
+    std::puts("No-copy payload pointer/guards/frame/pool lifetime checks passed");
 }
 
 // Captured by value: late/erroneous callbacks cannot reference stack state.
@@ -407,6 +458,7 @@ int main()
         if (!kernels) std::fprintf(stderr, "Kernel factory failed: %s\n", error.description.UTF8String);
         CHECK(kernels && error == nil); // Supported-device failures FAIL, never skip.
         id<MTLCommandQueue> queue = [device newCommandQueue]; CHECK(queue);
+        payloadAliasTests(device);
         dequantBatchTests(kernels, queue);
         hardwareTests(kernels, queue);
         std::puts("Metal decoder synthetic submission/completion smoke passed; no pixel correctness claim");

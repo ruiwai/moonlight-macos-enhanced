@@ -29,7 +29,7 @@ typedef void (^MLPyrowaveMetalCompletion)(BOOL success);
 
 // Fixed generation/session SDR 709 8-bit 420. One GPU slot, no output leases or
 // cross-queue readers. Intended CPU bound: one coordinator pending + one submitting
-// owner (well below four leases); callers must not accumulate additional owners.
+// owner plus a Metal-retained aliased frame; callers must not accumulate owners.
 // Immutable configuration: destroy/drain the old instance before same-session
 // replacement. stop is permanent, never frees resources still read by the GPU.
 // 512 MiB session allocation accounting, not process RSS/opaque driver caches or
@@ -50,7 +50,9 @@ typedef void (^MLPyrowaveMetalCompletion)(BOOL success);
                                      clock:(nullable MLPyrowaveClock)clock
                                    context:(nullable void *)context
                                      error:(NSError * _Nullable * _Nullable)error;
-// Borrows the immutable validated CPU owner only through this synchronous call.
+// Fallback borrows the immutable frame synchronously; a no-copy Metal resource
+// retains aliased frames/pool until resource retirement, not just completion callback.
+// Completion still does not capture the frame or decoder/UI owners.
 // Nonblocking trylock admission; backend alone commits exactly once on Submitted.
 - (MLPyrowaveMetalSubmitResult)submitFrame:(nullable MLPyrowaveFrame *)frame
                             presentation:(nullable MLPyrowaveMetalPresentation)presentation
