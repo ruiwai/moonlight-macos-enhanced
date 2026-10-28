@@ -310,9 +310,9 @@ and explicit existing C objects in an independent fatal-ASan/UBSan CI step (3 mi
 CPU factory-invalid checks precede device detection; unsupported macOS 13/Apple7
 hardware returns 77, visibly skipped in the summary. Supported factory/submit failures fail.
 A minimal coordinator fixture produces an immutable pool-backed sparse 128x128 frame.
-The real internal alias helper checks pointer identity, page-rounded length, zero
-guards, weak frame survival after caller release/autorelease drain, and lease/pool
-release with slot reuse. Nil device/frame rejects; no unsupported device mocks.
+The alias helper checks pointer/page length/guards; a real retained-reference blit drops CPU owners and drains pools before commit.
+With two other slots occupied, weak-frame survival and pool exhaustion precede bounded 10s completion/readback and command-buffer retirement/recycling.
+Expected payload+16 guards are copied independently before release. NOT EXECUTED; nil device/frame rejects without mocks.
 Default/non-pooled vectors must use copy fallback. Alias resources retain the frame
 and pool until retirement; completion does not capture frame/UI. All three slots
 plus fixed fallback resources remain conservatively budgeted. Upload end includes
@@ -328,8 +328,8 @@ real encoder conformance, deterministic Busy coverage, streaming or feature read
 
 Dequant batches bands with grid.z=3/4 per component/level: 42 dispatches become 13;
 IDWT remains 13, caches pipeline bindings and sets shared push bytes once per level.
-Synthetic bytewise dequant comparisons cover three strategies: serial per-band,
-serial batched and concurrent per-band via disjoint single-slice aliased array views.
+Synthetic bytewise dequant comparisons cover four strategies: serial/concurrent x per-band/batched;
+concurrent per-band uses disjoint single-slice aliased array views, not actual pooled-pyramid mip hazards.
 All 12 cases span 3/4 bands x 4x4/65x33 x mixed/absent/coded-zero, including poisoned
 unused bytes and exact +0 checks. CI-only execution is pending; this is same-shader
 scheduling equivalence, not independent numerical/IDWT or real-encoder pixel proof.

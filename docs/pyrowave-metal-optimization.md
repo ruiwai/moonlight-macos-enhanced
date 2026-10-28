@@ -46,8 +46,8 @@ only so far; standalone draw-gate C11/C++14 checks passed with ASan/UBSan.
   No alias is cached on decoder/pool; no CPU writes follow validation. Nil alias,
   including default/non-pooled vectors, uses the unchanged fixed upload fallback.
   Offsets still memcpy; all three slots and fallback heaps remain budgeted together.
-  Helper pointer/guard/weak-owner/slot-reuse tests and pooled sparse GPU smoke are
-  CI-only, unexecuted locally; macOS compile/lifetime/GPU output remain unverified.
+  Alias tests now blit payload+16 guards, drop CPU owners before commit, then check 10s completion/readback/retirement.
+  Weak-owner/slot-exhaustion/recycling assertions and pooled GPU smoke are NOT EXECUTED; macOS lifetime/output remain unverified.
 - The record scanner writes one native GPU-ready uint32_t `wordOffsets()` table
   (4-byte words; UINT32_MAX absent) directly while its cursor stays in bytes.
   Duplicate checks convert prior word entries to bytes for read32/exact memcmp.
@@ -122,7 +122,7 @@ No measurements were collected here.
 | --- | --- |
 | Existing CI | All existing Common protocol/reassembly/negotiation, metadata, codec/packetizer, receiver/composition/coordinator, stats/draw-gate and Metal kernel/decoder/renderer checks remain required, plus the app build. Fatal sanitizer/strict-warning policy stays. |
 | Kernel cache assertions | CI-only same-device object identity/error clearing, nil rejection after hit and cache survival. Unsupported GPU exit 77 is a skip, never a pass. No current execution claim. |
-| Scheduling equivalence | Three synthetic dequant strategies (serial per-band, serial batched, concurrent per-band via disjoint single-slice aliased views) compare bytewise across 12 cases; the same shader is not independent numerical/IDWT proof. |
+| Scheduling equivalence | Four synthetic dequant strategies (serial/concurrent x per-band/batched; concurrent per-band uses disjoint single-slice views) compare bytewise across 12 cases; NOT EXECUTED, not pooled-pyramid mip-hazard or independent nonzero numerical/IDWT proof. |
 | Numerical/pixel acceptance | Existing sparse/zero dispatch smoke and batching checks are **not** a full nonzero IDWT oracle. Full real-encoder nonzero corpus with independent reference planes, edges/aprons, quantization, chroma and agreed numeric bounds is prerequisite for FP16, fusion or hand-tuned SIMD. |
 | Lifetime/live/performance | Metal validation, stop/resize/control races, final-reader lifetime, live encrypted transport/color/presentation and matched hardware profiling remain separate gates; CI smoke does not prove them. |
 
@@ -161,8 +161,8 @@ reused textures; this is not permission to leave stale coefficients unwritten.
 3/4 bands x 4x4/65x33 x mixed/absent/coded-zero. Zero cases require exact +0,
 with poisoned unused record bytes in coded-zero fixtures. Existing nonzero
 comparisons use the same pipeline, not an independent numerical reference.
-All 12 cases compare three independently initialized/read-back outputs: serial
-per-band, serial batched and concurrent per-band using disjoint aliased array views.
+All 12 cases compare four independently initialized/read-back outputs: serial per-band,
+serial batched, concurrent per-band (disjoint aliased array views) and concurrent batched.
 This exercises same-shader scheduling equivalence, not the actual pooled pyramid's
 mip/slice hazards; that layout still requires GPU execution and Metal validation.
 Evidence is static inspection only: no local CI-only GPU tests were run and

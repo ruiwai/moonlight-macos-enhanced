@@ -7,11 +7,13 @@
 #include <dispatch/dispatch.h>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 #include <memory>
+#include <unistd.h>
 #define CHECK(c) do { if (!(c)) { \
     std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #c); std::abort(); \
 } } while (0)
@@ -117,12 +119,17 @@ static MLPyrowaveFrame *makeFrame(uint64_t generation)
     return frame;
 }
 
-static void payloadAliasTests(id<MTLDevice> device)
+static void finishGPU(id<MTLCommandBuffer> cmd);
+static void payloadAliasTests(id<MTLDevice> device, id<MTLCommandQueue> queue)
 {
     CHECK(!MLPyrowaveAliasPayload(nil, nil));
     CHECK(!MLPyrowaveAliasPayload(device, nil));
     __weak MLPyrowaveFrame *weakFrame = nil;
     __attribute__((objc_precise_lifetime)) id<MTLBuffer> alias = nil;
+    __attribute__((objc_precise_lifetime)) id<MTLCommandBuffer> cmd = nil;
+    id<MTLBuffer> readback = nil;
+    std::array<uint8_t, 40> expected;
+    void *other[2] = {};
     std::shared_ptr<MLPyrowave::PayloadPool> pool;
     std::weak_ptr<MLPyrowave::PayloadPool> weakPool;
     const void *pointer = nullptr;
@@ -144,27 +151,57 @@ static void payloadAliasTests(id<MTLDevice> device)
         const auto *bytes = static_cast<const uint8_t *>(alias.contents);
         CHECK(std::memcmp(bytes, f.bytes().data(), f.payloadSize()) == 0);
         for (size_t i = 0; i < 16; ++i) CHECK(bytes[f.payloadSize() + i] == 0);
+        CHECK(f.bytes().size() == expected.size());
+        std::memcpy(expected.data(), f.bytes().data(), expected.size()); // Independent payload + guards.
         frame = nil;
     }
     pool.reset(); // Prove that the alias alone also preserves the pool owner.
     @autoreleasepool {
         CHECK(weakFrame && !weakPool.expired()); // Caller and its autoreleases gone.
         pool = weakPool.lock(); CHECK(pool);
-        void *other[2] = {pool->acquire(40), pool->acquire(40)};
+        other[0] = pool->acquire(40); other[1] = pool->acquire(40);
+        CHECK(other[0] && other[1] && other[0] != other[1]);
         CHECK(other[0] != pointer && other[1] != pointer);
         bool exhausted = false;
         try { pool->acquire(40); } catch (const std::bad_alloc &) { exhausted = true; }
         CHECK(exhausted); // Alias still holds the third lease.
-        for (void *p : other) pool->release(p);
+        __attribute__((objc_precise_lifetime)) MLPyrowaveFrame *frame = weakFrame; CHECK(frame);
+        readback = [device newBufferWithLength:expected.size() options:MTLResourceStorageModeShared];
+        CHECK(readback && readback.contents && readback.contents != pointer);
+        std::memset(readback.contents, 0xa5, readback.length);
+        cmd = [queue commandBuffer]; CHECK(cmd && cmd.retainedReferences);
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder]; CHECK(blit);
+        [blit copyFromBuffer:alias sourceOffset:0 toBuffer:readback destinationOffset:0 size:expected.size()];
+        [blit endEncoding];
+        blit = nil;
+        frame = nil;
         alias = nil;
+    } // Drain frame/alias/encoder autoreleases; only the UNCOMMITTED command buffer holds the source.
+    @autoreleasepool {
+        CHECK(cmd.status == MTLCommandBufferStatusNotEnqueued && weakFrame);
+        bool exhausted = false;
+        try { pool->acquire(40); } catch (const std::bad_alloc &) { exhausted = true; }
+        CHECK(exhausted); // Both other slots remain occupied: the GPU-bound lease cannot be reused.
+        finishGPU(cmd); // Bounded 10s; completion captures no frame, alias or other resource.
+        CHECK(std::memcmp(readback.contents, expected.data(), expected.size()) == 0);
+        cmd = nil;
     }
-    CHECK(!weakFrame);
+    // Completion may signal before the driver's callback/resource references retire.
+    const auto retirementDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    bool retired = false;
+    while (std::chrono::steady_clock::now() < retirementDeadline) {
+        @autoreleasepool { retired = weakFrame == nil; }
+        if (retired) break;
+        usleep(1000); // Yield only after the weak-load autorelease pool has drained.
+    }
+    CHECK(retired);
     void *reused = pool->acquire(40);
     CHECK(reused == pointer); // First slot returned only after resource release.
     pool->release(reused);
+    for (void *p : other) pool->release(p);
     pool.reset();
     CHECK(weakPool.expired());
-    std::puts("No-copy payload pointer/guards/frame/pool lifetime checks passed");
+    std::puts("No-copy payload pointer/guards/uncommitted GPU blit/frame/pool lifetime checks passed");
 }
 
 // Captured by value: late/erroneous callbacks cannot reference stack state.
@@ -249,32 +286,34 @@ static void dequantBatchCase(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q,
     desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
     id<MTLTexture> outputs[] = {[k.device newTextureWithDescriptor:desc],
                               [k.device newTextureWithDescriptor:desc],
+                              [k.device newTextureWithDescriptor:desc],
                               [k.device newTextureWithDescriptor:desc]};
-    CHECK(outputs[0] && outputs[1] && outputs[2]);
+    CHECK(outputs[0] && outputs[1] && outputs[2] && outputs[3]);
     const NSUInteger rowBytes = ((width * sizeof(float) + 255) / 256) * 256;
     const NSUInteger imageBytes = rowBytes * height, textureBytes = 4 * imageBytes;
-    id<MTLBuffer> readback = [k.device newBufferWithLength:3 * textureBytes
+    id<MTLBuffer> readback = [k.device newBufferWithLength:4 * textureBytes
                                                   options:MTLResourceStorageModeShared];
     CHECK(readback && readback.contents);
     std::memset(readback.contents, 0x7f, readback.length); // Sentinel detects unwritten valid pixels.
     id<MTLCommandBuffer> cmd = [q commandBuffer]; CHECK(cmd);
     id<MTLBlitCommandEncoder> init = [cmd blitCommandEncoder]; CHECK(init);
-    for (unsigned mode = 0; mode < 3; ++mode)
+    for (unsigned mode = 0; mode < 4; ++mode)
         for (unsigned layer = 0; layer < 4; ++layer)
             [init copyFromBuffer:readback sourceOffset:0 sourceBytesPerRow:rowBytes
              sourceBytesPerImage:imageBytes sourceSize:MTLSizeMake(width, height, 1)
                        toTexture:outputs[mode] destinationSlice:layer destinationLevel:0
               destinationOrigin:MTLOriginMake(0, 0, 0)];
     [init endEncoding];
-    // 0: serial per-band; 1: serial batched; 2: concurrent per-band via disjoint aliased views.
-    for (unsigned mode = 0; mode < 3; ++mode) {
+    // 0: serial per-band; 1: serial batched; 2: concurrent per-band/views; 3: concurrent batched.
+    for (unsigned mode = 0; mode < 4; ++mode) {
+        const bool batched = mode == 1 || mode == 3;
         id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoderWithDispatchType:
-            mode == 2 ? MTLDispatchTypeConcurrent : MTLDispatchTypeSerial];
+            mode >= 2 ? MTLDispatchTypeConcurrent : MTLDispatchTypeSerial];
         CHECK(enc);
         [enc setComputePipelineState:k.dequant];
         [enc setBuffer:input offset:0 atIndex:0]; [enc setBuffer:offsets offset:0 atIndex:2];
         [enc setTexture:outputs[mode] atIndex:0];
-        const unsigned dispatches = mode == 1 ? 1 : bandCount;
+        const unsigned dispatches = batched ? 1 : bandCount;
         for (unsigned b = 0; b < dispatches; ++b) {
             Push push = {{int32_t(width), int32_t(height)}, int32_t(firstBand + b),
                 int32_t(base + b * layerStride), int32_t(blocksX), int32_t(layerStride)};
@@ -287,7 +326,7 @@ static void dequantBatchCase(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q,
                 push.outputLayer = 0; // One dispatched slice maps to the matching parent slice.
             }
             [enc setBytes:&push length:sizeof(push) atIndex:1];
-            [enc dispatchThreadgroups:MTLSizeMake(blocksX, blocksY, mode == 1 ? bandCount : 1)
+            [enc dispatchThreadgroups:MTLSizeMake(blocksX, blocksY, batched ? bandCount : 1)
                 threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         }
         [enc endEncoding];
@@ -296,7 +335,7 @@ static void dequantBatchCase(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q,
     // Read back only after compute completion, then wait for the blits before CPU inspection.
     cmd = [q commandBuffer]; CHECK(cmd);
     id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder]; CHECK(blit);
-    for (unsigned mode = 0; mode < 3; ++mode)
+    for (unsigned mode = 0; mode < 4; ++mode)
         for (unsigned layer = 0; layer < 4; ++layer)
             [blit copyFromTexture:outputs[mode] sourceSlice:layer sourceLevel:0
                      sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1)
@@ -311,11 +350,12 @@ static void dequantBatchCase(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q,
             const auto *row = result + layer * imageBytes + y * rowBytes;
             CHECK(std::memcmp(row, row + textureBytes, width * sizeof(float)) == 0);
             CHECK(std::memcmp(row, row + 2 * textureBytes, width * sizeof(float)) == 0);
+            CHECK(std::memcmp(row, row + 3 * textureBytes, width * sizeof(float)) == 0);
             for (NSUInteger x = 0; x < width; ++x) {
                 uint32_t bits; float value;
                 std::memcpy(&bits, row + x * 4, 4); std::memcpy(&value, &bits, 4);
                 CHECK(bits != 0x7f7f7f7f);
-                if (fixtureMode != 0) CHECK(bits == 0u); // Exact +0 in all three outputs via memcmp above.
+                if (fixtureMode != 0) CHECK(bits == 0u); // Exact +0 in all four outputs via memcmp above.
                 const unsigned block = unsigned(y / 32) * blocksX + unsigned(x / 32);
                 if (table[base + (layer - firstBand) * layerStride + block] == UINT32_MAX)
                     CHECK(value == 0.0f);
@@ -332,7 +372,7 @@ static void dequantBatchTests(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q)
             for (unsigned fixtureMode : {0u, 1u, 2u}) {
                 @autoreleasepool { dequantBatchCase(k, q, width, width == 4 ? 4 : 33, bands, fixtureMode); }
             }
-    std::puts("Dequant 3-strategy scheduling equivalence + analytic-zero oracle passed; NOT independent nonzero IDWT/encoder proof");
+    std::puts("Dequant 4-strategy scheduling equivalence + analytic-zero oracle passed; NOT pooled-pyramid mip hazards/independent nonzero IDWT/encoder proof");
 }
 static void hardwareTests(MLPyrowaveMetalKernels *k, id<MTLCommandQueue> q)
 {
@@ -458,7 +498,7 @@ int main()
         if (!kernels) std::fprintf(stderr, "Kernel factory failed: %s\n", error.description.UTF8String);
         CHECK(kernels && error == nil); // Supported-device failures FAIL, never skip.
         id<MTLCommandQueue> queue = [device newCommandQueue]; CHECK(queue);
-        payloadAliasTests(device);
+        payloadAliasTests(device, queue);
         dequantBatchTests(kernels, queue);
         hardwareTests(kernels, queue);
         std::puts("Metal decoder synthetic submission/completion smoke passed; no pixel correctness claim");
