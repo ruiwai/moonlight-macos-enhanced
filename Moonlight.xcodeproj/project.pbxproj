@@ -351,6 +351,7 @@
 				4C7E0A761FECBFFD00684411 /* Sources */,
 				4C7E0A771FECBFFD00684411 /* Frameworks */,
 				4C7E0A781FECBFFD00684411 /* Resources */,
+				D30000040000000000000004 /* Build PyroWave Metallibs */,
 				A4C4E0012E8A100000A1B001 /* Build AWDL Privileged Helper */,
 				B7C4E0012E8A100000A1B002 /* Build Remote USB Helper */,
 				A428584B2D50682400E39078 /* Embed Frameworks */,
@@ -471,6 +472,25 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		D30000040000000000000004 /* Build PyroWave Metallibs */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = (
+				"$(SRCROOT)/scripts/build_pyrowave_metallibs.py",
+				"$(SRCROOT)/Limelight/Stream/PyroWave/MLPyrowaveMetalShaders.h",
+			);
+			name = "Build PyroWave Metallibs";
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/PyroWave/pyrowave-idwt.metallib",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/PyroWave/pyrowave-idwt.sha256",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/PyroWave/pyrowave-dequant.metallib",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/PyroWave/pyrowave-dequant.sha256",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "python3 \"$SRCROOT/scripts/build_pyrowave_metallibs.py\" --output \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/PyroWave\" --work \"$TARGET_TEMP_DIR\"\n";
+		};
 		D30000030000000000000003 /* Generate Settings Search Index */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;

@@ -23,6 +23,9 @@ jobs:
         with:
           submodules: false
 
+      - name: Test offline metallib packaging (mocked tools, CPU only)
+        run: python3 tests/pyrowave/test_metallib_build.py
+
       - name: Initialize only the pinned Common submodule
         run: |
           git -c submodule.recurse=false submodule update --init --checkout -- \
@@ -216,18 +219,33 @@ jobs:
           xcrun clang++ "${flags[@]}" -I Limelight/Stream/PyroWave \
             Limelight/Stream/PyroWave/MLPyrowaveMetalKernels.mm tests/pyrowave/test_metal_kernels.mm \
             -framework Foundation -framework Metal -o "$RUNNER_TEMP/pyrowave-metal-kernels-tests"
-          if "$RUNNER_TEMP/pyrowave-metal-kernels-tests"; then
-            echo 'Metal pipeline creation passed; no decode dispatch/pixel validation' >> "$GITHUB_STEP_SUMMARY"
-          else
-            status=$?
-            if [ "$status" -eq 77 ]; then
-              echo '::notice::GPU pipeline checks SKIPPED: supported Metal device unavailable'
-              echo 'GPU pipeline checks SKIPPED; no decode dispatch/pixel validation' >> "$GITHUB_STEP_SUMMARY"
-              exit 0
+          app="$RUNNER_TEMP/PyroWave Kernels.app"
+          mkdir -p "$app/Contents/MacOS"
+          python3 scripts/build_pyrowave_metallibs.py \
+            --output "$app/Contents/Resources/PyroWave" --work "$RUNNER_TEMP"
+          cp "$RUNNER_TEMP/pyrowave-metal-kernels-tests" "$app/Contents/MacOS/kernels"
+          python3 - "$app/Contents/Info.plist" <<'PY'
+          import plistlib, sys
+          with open(sys.argv[1], 'wb') as f:
+              plistlib.dump({'CFBundleExecutable': 'kernels',
+                            'CFBundleIdentifier': 'com.moonlight.pyrowave.kernel-tests',
+                            'CFBundlePackageType': 'APPL'}, f)
+          PY
+          for mode in runtime bundled; do
+            command=("$RUNNER_TEMP/pyrowave-metal-kernels-tests")
+            if [ "$mode" = bundled ]; then command=("$app/Contents/MacOS/kernels" --bundled); fi
+            if "${command[@]}"; then
+              echo "Metal $mode library/pipeline checks passed; no pixel validation" >> "$GITHUB_STEP_SUMMARY"
             else
-              exit "$status"
+              status=$?
+              if [ "$status" -eq 77 ]; then
+                echo "::notice::Metal $mode checks SKIPPED (77): supported device unavailable"
+                echo "Metal $mode checks SKIPPED (77), not a GPU pass" >> "$GITHUB_STEP_SUMMARY"
+              else
+                exit "$status"
+              fi
             fi
-          fi
+          done
 
       - name: Compile and run actual Metal decoder synthetic smoke (not pixel correctness)
         timeout-minutes: 3

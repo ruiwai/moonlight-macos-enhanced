@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Actual pipeline creation only: no decode dispatch or pixel validation.
 #import "MLPyrowaveMetalKernels.h"
+#include "MLPyrowaveMetalLibrary.h"
+#include "MLPyrowaveMetalShaders.h"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #define CHECK(c) do { if (!(c)) { \
     std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #c); std::abort(); \
 } } while (0)
 
-int main()
+int main(int argc, char **argv)
 {
+    const bool bundled = argc == 2 && std::strcmp(argv[1], "--bundled") == 0;
+    CHECK(argc == 1 || bundled);
     @autoreleasepool {
         NSError *error = [NSError errorWithDomain:@"previous" code:99 userInfo:nil];
         CHECK([MLPyrowaveMetalKernels kernelsWithDevice:nil error:&error] == nil);
@@ -25,6 +30,24 @@ int main()
         if (!supported) {
             std::puts("SKIP: supported Metal device unavailable; no GPU pipeline checks run");
             return 77;
+        }
+        if (@available(macOS 13.0, *)) {
+            MTLCompileOptions *options = [MTLCompileOptions new];
+            options.languageVersion = MTLLanguageVersion3_0;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            options.fastMathEnabled = NO;
+#pragma clang diagnostic pop
+            NSBundle *bundle = bundled ? [NSBundle bundleForClass:MLPyrowaveMetalKernels.class] : nil;
+            NSString *names[] = {@"pyrowave-idwt", @"pyrowave-dequant"};
+            const char *sources[] = {idwt_msl_source, wavelet_dequant_msl_source};
+            for (unsigned i = 0; i < 2; ++i) {
+                error = [NSError errorWithDomain:@"previous" code:99 userInfo:nil];
+                id<MTLLibrary> library = MLPyrowaveLoadLibrary(device, bundle, names[i], sources[i], options, &error);
+                if (!library) std::fprintf(stderr, "Library failed: %s\n", error.description.UTF8String);
+                CHECK(library != nil && error == nil);
+                CHECK([library.label isEqualToString:bundled ? @"PyroWave bundled" : @"PyroWave runtime"]);
+            }
         }
         error = [NSError errorWithDomain:@"previous" code:99 userInfo:nil];
         MLPyrowaveMetalKernels *kernels = [MLPyrowaveMetalKernels kernelsWithDevice:device error:&error];

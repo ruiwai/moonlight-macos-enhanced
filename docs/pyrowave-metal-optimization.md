@@ -78,7 +78,22 @@ only so far; standalone draw-gate C11/C++14 checks passed with ASan/UBSan.
   publish only on success; any failure preserves the last good entry. Eviction
   does not invalidate bundles callers retain. No decoder, texture, heap or frame
   is cached. This removes repeated preflight/setup compilation, not measured
-  steady-state speedup. Runtime source compilation and fastMath=NO remain.
+  steady-state speedup. Runtime source fallback and fastMath=NO remain.
+- Offline compute packaging uses `scripts/build_pyrowave_metallibs.py`: exact
+  raw strings compile separately as Metal 3.0, macOS 13 minimum, no fast math.
+  Both links must succeed before staged publication of `pyrowave-idwt.metallib`,
+  `pyrowave-dequant.metallib` and their same-stem `.sha256` companions under
+  bundle `Resources/PyroWave`. Intermediates live in temporary work directories.
+  SHA256 covers UTF-8 `pyrowave-metal3.0-fp32-v1\n` plus exact source bytes.
+  Only a matching signature permits bundle URL loading; missing/stale/unloadable
+  libraries fall back to existing source options, without external lookup or a
+  persistent cache. Libraries are labeled `PyroWave bundled` / `PyroWave runtime`.
+  The macOS target packages before helper phases; its deployment floor stays 12,
+  while PyroWave preflight/offline Metal require 13. Renderer shaders are unchanged.
+  Mocked Python tests/static review do not verify Apple tool flag support, app
+  build/signing, library loading or GPU output; these remain CI/hardware gates.
+  Missing/stale fingerprint fallback is statically reviewed, not runtime-tested.
+  No binary artifacts, precision changes or measured speedup are included.
 
 ## Profiling contract
 
@@ -137,8 +152,8 @@ No measurements were collected here.
   nonzero corpus; no precision or fast-math change is included.
 - IDWT hand-tuned SIMD or fusion: prove apron/mirror ordering, quantization and
   chroma behavior against independent references before profiling acceptance.
-- Precompiled metallib: future packaging/version/device validation work; the
-  one-entry in-process cache is not a precompiled or disk library cache.
+- Offline metallib app-build/device/runtime validation remains pending; the
+  one-entry in-process pipeline cache is unchanged, not a persistent disk cache.
 
 ## Apple Silicon follow-up audit (2026-10-27)
 

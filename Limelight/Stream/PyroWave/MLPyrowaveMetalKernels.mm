@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #import "MLPyrowaveMetalKernels.h"
 #include "MLPyrowaveMetalShaders.h"
+#include "MLPyrowaveMetalLibrary.h"
 
 NSErrorDomain const MLPyrowaveMetalErrorDomain = @"MLPyrowaveMetalErrorDomain";
 
@@ -86,10 +87,8 @@ static id<MTLComputePipelineState> Pipeline(id<MTLDevice> device, id<MTLLibrary>
         if (![device supportsFamily:MTLGPUFamilyApple7] || device.maxThreadsPerThreadgroup.width < 128)
             return Fail(error, MLPyrowaveMetalErrorUnsupportedDevice, @"Requires Apple7 and 128 threads");
         MTLCompileOptions *options = [MTLCompileOptions new];
-        NSString *idwtSource = [NSString stringWithUTF8String:idwt_msl_source];
-        NSString *dequantSource = [NSString stringWithUTF8String:wavelet_dequant_msl_source];
-        if (!options || !idwtSource || !dequantSource)
-            return Fail(error, MLPyrowaveMetalErrorPipeline, @"Shader options/source allocation failed");
+        if (!options)
+            return Fail(error, MLPyrowaveMetalErrorPipeline, @"Shader options allocation failed");
         options.languageVersion = MTLLanguageVersion3_0;
         // Explicit legacy precision switch, including SDKs that deprecate it.
 #pragma clang diagnostic push
@@ -97,11 +96,14 @@ static id<MTLComputePipelineState> Pipeline(id<MTLDevice> device, id<MTLLibrary>
         options.fastMathEnabled = NO;
 #pragma clang diagnostic pop
         NSError *cause = nil;
+        NSBundle *bundle = [NSBundle bundleForClass:MLPyrowaveMetalKernels.class];
         // Independent libraries: generated helper names collide if concatenated.
-        id<MTLLibrary> dequantLibrary = [device newLibraryWithSource:dequantSource options:options error:&cause];
+        id<MTLLibrary> dequantLibrary = MLPyrowaveLoadLibrary(device, bundle,
+            @"pyrowave-dequant", wavelet_dequant_msl_source, options, &cause);
         if (!dequantLibrary) return Fail(error, MLPyrowaveMetalErrorPipeline, @"Dequant library failed", cause);
         cause = nil;
-        id<MTLLibrary> idwtLibrary = [device newLibraryWithSource:idwtSource options:options error:&cause];
+        id<MTLLibrary> idwtLibrary = MLPyrowaveLoadLibrary(device, bundle,
+            @"pyrowave-idwt", idwt_msl_source, options, &cause);
         if (!idwtLibrary) return Fail(error, MLPyrowaveMetalErrorPipeline, @"IDWT library failed", cause);
         id<MTLComputePipelineState> dequant = Pipeline(device, dequantLibrary,
             @"pyrowave_wavelet_dequant", nil, 128, true, error);

@@ -1,5 +1,19 @@
 # PyroWave prerequisites (CI only)
 
+## Offline shader packaging (portable mocked checks)
+Local `python3 tests/pyrowave/test_metallib_build.py` is explicitly allowed:
+it imports the builder and mocks every tool invocation, checking exact raw-source
+extraction/fingerprints, separate argv/FP32 flags, spaced paths and failure publication.
+It does not compile Metal. Golden/codec/receiver/Metal builds/runs remain CI-only.
+Malformed-first-closer tests reject before tools/output. Loader nil/invalid-UTF8,
+fingerprint allocation-failure fallback and compiler-error branches are static-only
+checks here; Apple allocation-failure/runtime validation is unavailable locally.
+The macOS workflow builds two offline libraries into a minimal temporary `.app`,
+then runs the naked kernel executable (runtime fallback) and `.app` executable
+with `--bundled`. Both check library labels before existing factory/cache checks;
+exit 77 is an explicit hardware skip, never a pass. Offline compiler failures
+are fatal even without a supported GPU. Apple compilation/runtime await CI.
+
 ## Payload leases (standalone portable checks)
 `test_payload_pool.cpp` uses only production `CodecBytes`/pool headers, no Common
 or codec implementation. Local standalone pool, draw-gate and stats checks are
