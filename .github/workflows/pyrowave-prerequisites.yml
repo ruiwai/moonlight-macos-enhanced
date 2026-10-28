@@ -268,17 +268,25 @@ jobs:
             "$native/MLPyrowaveCoordinator.mm" tests/pyrowave/test_metal_decoder.mm \
             "${objects[@]}" -framework Foundation -framework Metal \
             -o "$RUNNER_TEMP/pyrowave-metal-decoder-tests"
-          if "$RUNNER_TEMP/pyrowave-metal-decoder-tests"; then
-            echo 'Metal decoder synthetic submission/completion smoke passed; NOT pixel correctness or feature readiness' >> "$GITHUB_STEP_SUMMARY"
-          else
-            status=$?
-            if [ "$status" -eq 77 ]; then
-              echo '::notice::Metal decoder hardware smoke SKIPPED (77): macOS 13/Apple7 device unavailable; CPU factory checks passed'
-              echo 'Metal decoder hardware smoke SKIPPED (77); CPU factory checks passed; no GPU correctness result' >> "$GITHUB_STEP_SUMMARY"
+          app="$RUNNER_TEMP/PyroWave Decoder.app"
+          cp -R "$RUNNER_TEMP/PyroWave Kernels.app" "$app"
+          cp "$RUNNER_TEMP/pyrowave-metal-decoder-tests" "$app/Contents/MacOS/kernels"
+          # Keep CFBundleExecutable=kernels and the identical compiled resources.
+          for mode in runtime bundled; do
+            command=("$RUNNER_TEMP/pyrowave-metal-decoder-tests")
+            if [ "$mode" = bundled ]; then command=("$app/Contents/MacOS/kernels"); fi
+            if "${command[@]}"; then
+              echo "Metal decoder $mode synthetic submission/completion smoke passed; NOT pixel correctness or feature readiness" >> "$GITHUB_STEP_SUMMARY"
             else
-              exit "$status"
+              status=$?
+              if [ "$status" -eq 77 ]; then
+                echo "::notice::Metal decoder $mode hardware smoke SKIPPED (77): macOS 13/Apple7 device unavailable; CPU factory checks passed"
+                echo "Metal decoder $mode hardware smoke SKIPPED (77); CPU factory checks passed; no GPU correctness result" >> "$GITHUB_STEP_SUMMARY"
+              else
+                exit "$status"
+              fi
             fi
-          fi
+          done
 
       - name: Compile and run standalone Metal renderer offscreen smoke
         timeout-minutes: 3
@@ -302,17 +310,25 @@ jobs:
             tests/pyrowave/test_metal_renderer.mm "${objects[@]}" \
             -framework Foundation -framework Metal -framework QuartzCore \
             -o "$RUNNER_TEMP/pyrowave-metal-renderer-tests"
-          if "$RUNNER_TEMP/pyrowave-metal-renderer-tests"; then
-            echo 'Metal renderer offscreen zero-frame/range/letterbox smoke passed; NOT full encoder pixel correctness or drawable/UI presentation' >> "$GITHUB_STEP_SUMMARY"
-          else
-            status=$?
-            if [ "$status" -eq 77 ]; then
-              echo '::notice::Metal renderer hardware smoke SKIPPED (77): macOS 13/Apple7 device unavailable; CPU factory checks passed'
-              echo 'Metal renderer hardware smoke SKIPPED (77); CPU factory checks passed; no GPU rendering result' >> "$GITHUB_STEP_SUMMARY"
+          app="$RUNNER_TEMP/PyroWave Renderer.app"
+          cp -R "$RUNNER_TEMP/PyroWave Kernels.app" "$app"
+          cp "$RUNNER_TEMP/pyrowave-metal-renderer-tests" "$app/Contents/MacOS/kernels"
+          # Keep CFBundleExecutable=kernels; decoder/renderer accept no --bundled flag.
+          for mode in runtime bundled; do
+            command=("$RUNNER_TEMP/pyrowave-metal-renderer-tests")
+            if [ "$mode" = bundled ]; then command=("$app/Contents/MacOS/kernels"); fi
+            if "${command[@]}"; then
+              echo "Metal renderer $mode offscreen zero-frame/range/letterbox smoke passed; NOT full encoder pixel correctness or drawable/UI presentation" >> "$GITHUB_STEP_SUMMARY"
             else
-              exit "$status"
+              status=$?
+              if [ "$status" -eq 77 ]; then
+                echo "::notice::Metal renderer $mode hardware smoke SKIPPED (77): macOS 13/Apple7 device unavailable; CPU factory checks passed"
+                echo "Metal renderer $mode hardware smoke SKIPPED (77); CPU factory checks passed; no GPU rendering result" >> "$GITHUB_STEP_SUMMARY"
+              else
+                exit "$status"
+              fi
             fi
-          fi
+          done
 
       - name: Checkout pinned CPU packetizer oracle
         uses: actions/checkout@v6

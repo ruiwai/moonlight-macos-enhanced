@@ -92,8 +92,29 @@ only so far; standalone draw-gate C11/C++14 checks passed with ASan/UBSan.
   while PyroWave preflight/offline Metal require 13. Renderer shaders are unchanged.
   Mocked Python tests/static review do not verify Apple tool flag support, app
   build/signing, library loading or GPU output; these remain CI/hardware gates.
-  Missing/stale fingerprint fallback is statically reviewed, not runtime-tested.
+  Missing resources, stale fingerprints and matching-fingerprint/unloadable libraries
+  now HAVE TEST SOURCE in fresh temporary bundles; NOT EXECUTED (CI/hardware only).
+  Decoder/renderer CI runs both bare runtime and copied bundled-resource apps;
+  these paths are NOT EXECUTED here, not evidence of Apple loading or GPU correctness.
   No binary artifacts, precision changes or measured speedup are included.
+
+## Remaining-work status (original proposals)
+
+Current acceptance is static/portable only; no measured speedup or all-complete claim.
+“Done” below means source implemented, not GPU/performance acceptance.
+
+| Proposal | Status / remaining evidence or architecture |
+| --- | --- |
+| GPU-ready offsets | Done `26cbcea`; codec/GPU CI remains required. |
+| Bounded payload pool | Done `66ae7e4`; portable allocator checks only locally. |
+| Direct Metal alias | Done `f434bbe`; eliminates eligible payload upload copy, but Common → pool `CopyFrame` remains; lifetime/hardware gates pending. |
+| Precompiled compute | Done `33f1bef`; Apple build/load and fallback CI source NOT EXECUTED. |
+| FP16 storage/arithmetic | BLOCKED: independent real-encoder nonzero golden/reference planes, numeric bounds and hardware acceptance. |
+| Fusion | BLOCKED: apron/order/reference proof and profiling evidence. |
+| Direct packet/FEC in-place reassembly | BLOCKED: Common API ownership redesign; aliasing does not solve it. |
+| Extra GPU slots | Deferred pending latency/backpressure benchmarks and bounded lifetime/budget design. |
+
+Blockers are evidence/architecture requirements, not user approval; no approval is needed.
 
 ## Profiling contract
 

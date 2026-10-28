@@ -5,7 +5,7 @@ Local `python3 tests/pyrowave/test_metallib_build.py` is explicitly allowed:
 it imports the builder and mocks every tool invocation, checking exact raw-source
 extraction/fingerprints, separate argv/FP32 flags, spaced paths and failure publication.
 It does not compile Metal. Golden/codec/receiver/Metal builds/runs remain CI-only.
-Malformed-first-closer tests reject before tools/output. Loader nil/invalid-UTF8,
+Malformed-first-closer tests reject before tools/output. Loader invalid-UTF8,
 fingerprint allocation-failure fallback and compiler-error branches are static-only
 checks here; Apple allocation-failure/runtime validation is unavailable locally.
 The macOS workflow builds two offline libraries into a minimal temporary `.app`,
@@ -13,6 +13,17 @@ then runs the naked kernel executable (runtime fallback) and `.app` executable
 with `--bundled`. Both check library labels before existing factory/cache checks;
 exit 77 is an explicit hardware skip, never a pass. Offline compiler failures
 are fatal even without a supported GPU. Apple compilation/runtime await CI.
+Missing-resource, stale-signature/invalid-metallib and correct-packaged-signature/
+invalid-metallib loader fallback now HAS TEST SOURCE, NOT EXECUTED. Bundled kernel
+checks use three fresh unique temporary `.bundle` paths/identifiers, dequant source
+and the same FP32 options; runtime labels, cleared sentinel errors and nil-source
+pipeline errors are asserted. Real packaged resources are read only; fixtures removed.
+Decoder/renderer CI each runs bare runtime and copied resource-bearing `.app` binaries,
+without `--bundled`, preserving `CFBundleExecutable=kernels`; summaries label both
+modes and explicit 77 skips, never GPU passes. These new paths are NOT EXECUTED here.
+Current acceptance is static/portable only, with no measured speedup; see the
+[remaining-work status](../../docs/pyrowave-metal-optimization.md#remaining-work-status-original-proposals)
+for evidence/architecture blockers, not approval requests or an all-complete claim.
 
 ## Payload leases (standalone portable checks)
 `test_payload_pool.cpp` uses only production `CodecBytes`/pool headers, no Common

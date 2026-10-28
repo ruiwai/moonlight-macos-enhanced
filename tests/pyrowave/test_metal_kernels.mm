@@ -10,6 +10,52 @@
     std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #c); std::abort(); \
 } } while (0)
 
+static void CheckLoaderFallbacks(id<MTLDevice> device, NSBundle *packaged, MTLCompileOptions *options)
+{
+    NSFileManager *files = NSFileManager.defaultManager;
+    NSString *name = @"pyrowave-dequant";
+    NSURL *signature = [packaged URLForResource:name withExtension:@"sha256" subdirectory:@"PyroWave"];
+    CHECK(signature != nil);
+    NSData *correct = [NSData dataWithContentsOfURL:signature];
+    CHECK(correct.length == 64);
+    for (unsigned mode = 0; mode < 3; ++mode) {
+        // Fresh paths AND identifiers avoid NSBundle resource-cache reuse.
+        NSString *identifier = [@"com.moonlight.pyrowave.fallback." stringByAppendingString:NSUUID.UUID.UUIDString];
+        NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
+            [identifier stringByAppendingPathExtension:@"bundle"]];
+        NSString *contents = [path stringByAppendingPathComponent:@"Contents"];
+        NSString *resources = [contents stringByAppendingPathComponent:@"Resources/PyroWave"];
+        CHECK(![files fileExistsAtPath:path]);
+        CHECK([files createDirectoryAtPath:resources withIntermediateDirectories:YES attributes:nil error:nil]);
+        NSDictionary *info = @{@"CFBundleIdentifier": identifier, @"CFBundlePackageType": @"BNDL"};
+        CHECK([info writeToFile:[contents stringByAppendingPathComponent:@"Info.plist"] atomically:YES]);
+        if (mode != 0) {
+            CHECK([[@"invalid metallib" dataUsingEncoding:NSUTF8StringEncoding]
+                writeToFile:[resources stringByAppendingPathComponent:@"pyrowave-dequant.metallib"] atomically:YES]);
+            NSData *fingerprint = mode == 1 ? [@"stale" dataUsingEncoding:NSUTF8StringEncoding] : correct;
+            CHECK([fingerprint writeToFile:[resources stringByAppendingPathComponent:@"pyrowave-dequant.sha256"]
+                atomically:YES]);
+        }
+        NSBundle *fixture = [NSBundle bundleWithPath:path];
+        CHECK(fixture != nil && [fixture.bundleIdentifier isEqualToString:identifier]);
+        if (mode != 0) {
+            CHECK([fixture URLForResource:name withExtension:@"metallib" subdirectory:@"PyroWave"] != nil);
+            CHECK([fixture URLForResource:name withExtension:@"sha256" subdirectory:@"PyroWave"] != nil);
+        }
+        NSError *error = [NSError errorWithDomain:@"previous" code:99 userInfo:nil];
+        id<MTLLibrary> library = MLPyrowaveLoadLibrary(device, fixture, name,
+            wavelet_dequant_msl_source, options, &error);
+        if (!library) std::fprintf(stderr, "Fallback %u failed: %s\n", mode, error.description.UTF8String);
+        CHECK(library != nil && error == nil);
+        CHECK([library.label isEqualToString:@"PyroWave runtime"]);
+        CHECK([files removeItemAtPath:path error:nil]);
+    }
+    NSError *error = [NSError errorWithDomain:@"previous" code:99 userInfo:nil];
+    CHECK(MLPyrowaveLoadLibrary(device, packaged, name, nullptr, options, &error) == nil);
+    CHECK([error.domain isEqualToString:MLPyrowaveMetalErrorDomain]);
+    CHECK(error.code == MLPyrowaveMetalErrorPipeline);
+}
+
 int main(int argc, char **argv)
 {
     const bool bundled = argc == 2 && std::strcmp(argv[1], "--bundled") == 0;
@@ -48,6 +94,7 @@ int main(int argc, char **argv)
                 CHECK(library != nil && error == nil);
                 CHECK([library.label isEqualToString:bundled ? @"PyroWave bundled" : @"PyroWave runtime"]);
             }
+            if (bundled) CheckLoaderFallbacks(device, bundle, options);
         }
         error = [NSError errorWithDomain:@"previous" code:99 userInfo:nil];
         MLPyrowaveMetalKernels *kernels = [MLPyrowaveMetalKernels kernelsWithDevice:device error:&error];
