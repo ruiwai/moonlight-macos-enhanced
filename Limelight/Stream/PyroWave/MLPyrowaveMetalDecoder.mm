@@ -69,7 +69,9 @@ bool LayoutBudget(const MLPyrowave::CodecSession &s, uint64_t maxBuffer, Layout 
     if (!count || count > UINT32_MAX || !Mul(count, 4, l.offsetBytes) ||
         l.offsetBytes > maxBuffer || Payload > maxBuffer ||
         !Add(Payload, l.offsetBytes, owner) || !Add(owner, 4096, owner) ||
-        !Mul(owner, 2, owners) || !Add(128 * MiB + 32 * MiB + MiB, owners, l.cpuReserve))
+        !Mul(owner, 2, owners) || !Add(128 * MiB + 32 * MiB + MiB, owners, l.cpuReserve) ||
+        // Reserve all slots, even inactive; default CPU owners remain double-counted.
+        !Add(l.cpuReserve, MLPyrowave::PayloadPool::MaxBytes, l.cpuReserve))
         return false;
     l.count = uint32_t(count);
     return l.cpuReserve < MLPyrowaveSessionAllocationCap && l.offsetBytes <= std::numeric_limits<NSUInteger>::max();

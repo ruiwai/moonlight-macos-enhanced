@@ -72,6 +72,17 @@ jobs:
           "$RUNNER_TEMP/pyrowave-strict-reassembly-tests"
           "$RUNNER_TEMP/pyrowave-reassembly-arena-tests"
 
+      - name: Compile and run standalone payload pool (no Common or GPU)
+        env:
+          ASAN_OPTIONS: halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          flags=(-std=c++14 -pthread -Wall -Wextra -Werror -pedantic -g -O1
+                 '-fsanitize=address,undefined' -fno-sanitize-recover=all -fno-omit-frame-pointer)
+          xcrun clang++ "${flags[@]}" -I Limelight/Stream/PyroWave \
+            tests/pyrowave/test_payload_pool.cpp -o "$RUNNER_TEMP/pyrowave-payload-pool"
+          "$RUNNER_TEMP/pyrowave-payload-pool"
+
       - name: Compile and run standalone codec checks with fatal sanitizers
         env:
           ASAN_OPTIONS: halt_on_error=1

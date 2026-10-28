@@ -32,8 +32,9 @@ std::unique_ptr<const ValidatedCodecFrame> ValidateCodecFrame(
 class CodecValidator final {
 public:
     static std::unique_ptr<CodecValidator> Create(const CodecSession &) noexcept;
-    // Exact size payloadLength+16, payload 8 bytes..16 MiB. Capacity (not just
-    // size), cached masks and offsets must fit the 32 MiB storage budget.
+    // Exact size payloadLength+16, payload 8 bytes..16 MiB. Default storage charges
+    // capacity (not size); pooled storage charges a whole 16 MiB + 64 KiB slot.
+    // This charge, cached masks and offsets must fit the 32 MiB storage budget.
     // Precondition: first payloadLength bytes initialized; guards may be uninitialized.
     // Full validation precedes transfer; success preserves data() and zeros guards.
     // Failure returns null without moving bytes or publishing any frame.

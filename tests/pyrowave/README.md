@@ -1,5 +1,15 @@
 # PyroWave prerequisites (CI only)
 
+## Payload leases (standalone portable checks)
+`test_payload_pool.cpp` uses only production `CodecBytes`/pool headers, no Common
+or codec implementation. Local standalone pool, draw-gate and stats checks are
+allowed with strict C++14 (C11 too for gate/stats) and fatal ASan/UBSan; pool uses
+`-pthread`. Golden, codec, receiver and Metal builds/runs remain CI-only.
+The receiver owns three lazy 64-KiB-aligned slots of 16 MiB+64 KiB each, with no
+payload preclear or fallback. Exhaustion retires the frame; newer IDs recover
+after release. Allocator leases preserve frames after Stop/receiver destruction.
+Portable checks prove allocator behavior only, not codec/GPU correctness or speed.
+
 ## HUD event stats (portable CPU checks)
 `test_stats.c` tests the app's pure `MLPyrowaveStats.h` accumulator in strict
 C11 and C++14 with fatal ASan/UBSan: real-duration window rates, retained rates
@@ -148,8 +158,8 @@ vector; 16 zero guards are retained. Reassembly copy, shared GPU upload copy and
 Common allocations remain: no zero-copy, direct-to-Metal,
 precision change or measured speedup. Local lint is not test execution.
 
-Local validation for this candidate is lint only; do not build or execute the
-golden tests locally:
+Outside the standalone portable checks above, local validation is lint only;
+do not build or execute the golden/codec/receiver/Metal tests locally:
 
 ```sh
 nix shell nixpkgs#actionlint -c actionlint .github/workflows/pyrowave-prerequisites.yml
@@ -168,15 +178,16 @@ Only even 2..16384 SDR709/8-bit/420 sessions are supported; wire range full/limi
 and siting center/left must match. Input is 8 bytes..16 MiB. Five-level aligned
 layout capacity is preflighted with checked uint64 arithmetic before allocation.
 Input+16 zero guards, offsets and session-cached masks (4/2 bytes per slot),
-object sizes/1024-byte bookkeeping must fit 32 MiB, using vector capacities
-(allocation requests, not process RSS).
+object sizes/1024-byte bookkeeping must fit 32 MiB: default storage is charged by
+vector capacity; pooled storage is charged a whole 16 MiB + 64 KiB slot regardless
+of logical size/capacity (allocation requests, not process RSS).
 `wordOffsets()` exposes one native GPU-ready uint32_t table of 4-byte WORD offsets
 to unique record headers; UINT32_MAX is absent. The byte-cursor scanner writes it
 directly; duplicate checks convert prior entries back to bytes for exact comparison.
 Metal uploads this same table with one memcpy, without a conversion pass or second
 table. Guard bytes are initialized, but shader read safety is not certified. Receiver recovery
 copies once into owned scratch; `ValidateOwned` validates then moves it without
-a second payload copy. C++14 stateless allocator-backed `CodecBytes` avoids payload
+a second payload copy. C++14 optionally pooled allocator-backed `CodecBytes` avoids payload
 preclear: complete exact-length copy writes payload before validation, then the
 16 guards are zeroed before publication. Count construction/resize without a
 value requires explicit writes before reads; explicit-value construction still fills.

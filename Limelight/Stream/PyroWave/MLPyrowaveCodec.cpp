@@ -278,7 +278,7 @@ std::unique_ptr<const ValidatedCodecFrame> CodecValidator::ValidateOwned(
         if (payloadLength < 8 || payloadLength > InputLimit ||
             bytes.size() != payloadLength + 16) return nullptr;
         std::vector<uint32_t> offsets;
-        if (!Validate(bytes.data(), payloadLength, bytes.capacity(), info, offsets)) return nullptr;
+        if (!Validate(bytes.data(), payloadLength, CodecBytesAllocationSize(bytes), info, offsets)) return nullptr;
         std::fill(bytes.begin() + payloadLength, bytes.end(), uint8_t(0));
         return std::unique_ptr<const ValidatedCodecFrame>(new ValidatedCodecFrame(
             std::move(bytes), std::move(offsets), session_, info));

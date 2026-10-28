@@ -7,7 +7,8 @@
 namespace MLPyrowave {
 Receiver::Receiver(std::unique_ptr<CodecValidator> &&validator, uint32_t maxPacketSize,
     uint64_t (*clock)(void *), void *clockContext)
-    : validator_(std::move(validator)), maxPacketSize_(maxPacketSize), clock_(clock),
+    : validator_(std::move(validator)), payloadPool_(std::make_shared<PayloadPool>()),
+      maxPacketSize_(maxPacketSize), clock_(clock),
       clockContext_(clockContext), reassembly_(MLPyrowaveReassemblyCreate())
 {
 }
@@ -102,7 +103,7 @@ std::unique_ptr<const ReceivedFrame> Receiver::Receive(
             Discard(); return nullptr;
         }
         const size_t payloadLength = header.codecPayloadLength;
-        CodecBytes scratch(payloadLength + 16);
+        CodecBytes scratch(payloadLength + 16, CodecBytes::allocator_type(payloadPool_));
         if (!Sample(now)) return nullptr;
         size_t length = 0;
         MLPyrowaveFrameInfo ownedInfo = {};

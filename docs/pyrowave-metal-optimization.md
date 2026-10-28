@@ -20,7 +20,7 @@ only so far; standalone draw-gate C11/C++14 checks passed with ASan/UBSan.
   speedup claim: reassembly copy and shared GPU upload copy remain.
   No direct-to-Metal ownership or precision change is included.
 - Receiver recovery copies into owned payload+16-byte-guard scratch once.
-  `CodecBytes`, a C++14 stateless allocator-backed overwrite byte vector, removes
+  `CodecBytes`, a C++14 optionally pooled overwrite byte vector, removes
   payload preclear; complete exact-length copy initializes payload before validation.
   Only the 16 guards are zero-initialized before publication, not the payload.
   Session `CodecValidator` caches immutable layout masks; `ValidateOwned` fully
@@ -29,6 +29,16 @@ only so far; standalone draw-gate C11/C++14 checks passed with ASan/UBSan.
   into overwrite storage and zeros its 16 guards before publication.
   Cached masks, offsets and vector capacities stay budgeted; OR/popcount counts
   pooled significant/sign bits without changing duplicate/validation semantics.
+- Receiver-only payload leases use exactly three lazy 64-KiB-aligned fixed slots,
+  each 16 MiB+64 KiB (maximum 48 MiB+192 KiB). Exhaustion drops/retires the frame;
+  release permits strictly newer IDs, not replay. Stop/destruction preserves held
+  frames through allocator shared ownership; payload is never precleared.
+  Codec accounting charges a whole slot, not logical vector capacity. Metal reserves
+  all three, even inactive, in addition to 128 MiB reassembly +32 MiB validator
+  +1 MiB bookkeeping +2*(Payload+offsetBytes+4096). Double counting default CPU
+  inputs/leases is deliberately conservative; the 512 MiB cap is unchanged.
+  Standalone pool local sanitizer tests are allowed; golden/codec/receiver/Metal
+  execution stays CI-only. Upload copy remains; no performance gain is claimed.
 - The record scanner writes one native GPU-ready uint32_t `wordOffsets()` table
   (4-byte words; UINT32_MAX absent) directly while its cursor stays in bytes.
   Duplicate checks convert prior word entries to bytes for read32/exact memcmp.

@@ -190,9 +190,32 @@ static void testBoundedUntrustedInput()
         CHECK(deliver(*r, build(Id + 1))); // New valid identity recovers independently.
     }
 }
+static void testPayloadLeases()
+{
+    Clock c; auto r = create(c);
+    std::array<Owned, 3> held;
+    for (size_t i = 0; i < held.size(); ++i) {
+        held[i] = deliver(*r, build(Id + uint32_t(i))); CHECK(held[i]);
+        CHECK(CodecBytesAllocationSize(held[i]->codec->bytes()) == PayloadPool::SlotBytes);
+        for (size_t j = 0; j < i; ++j)
+            CHECK(held[i]->codec->bytes().data() != held[j]->codec->bytes().data());
+    }
+    CHECK(!deliver(*r, build(Id + 3))); // Exhausted fourth retires its watermark.
+    const auto *recycled = held[1]->codec->bytes().data(); held[1].reset();
+    CHECK(!deliver(*r, build(Id + 3))); // Releasing cannot reopen the retired ID.
+    held[1] = deliver(*r, build(Id + 4)); CHECK(held[1]);
+    CHECK(held[1]->codec->bytes().data() == recycled);
+    r->Stop(); r.reset();
+    for (const auto &v : held) {
+        CHECK(std::equal(Codec.begin(), Codec.end(), v->codec->bytes().begin()));
+        CHECK(std::all_of(v->codec->bytes().begin() + Codec.size(), v->codec->bytes().end(),
+                          [](uint8_t b) { return b == 0; }));
+    }
+}
 int main()
 {
     testOwnershipAndTiming(); testPoisonAndReplay(); testDeadlinesAndClock();
     testInvalidAndMetadata(); testFactoryStopAndIsolation(); testBoundedUntrustedInput();
+    testPayloadLeases();
     std::puts("raw-descriptor receiver CPU checks passed"); return 0;
 }

@@ -104,7 +104,10 @@ Two fixed tracked heaps bound private textures and shared uploads. The original 
 cap was 256 MiB; current session accounting has a 512 MiB hard ceiling, not a
 full-cap allocation. It reserves 128 MiB strict reassembly including scratch, 32 MiB
 validation peak, two CPU owners (each 16 MiB + 16-byte guard + offset table + 4096
-bytes), and 1 MiB bookkeeping, then charges actual heap sizes; views alias storage.
+bytes), and 1 MiB bookkeeping, plus all three payload slots (48 MiB + 192 KiB),
+including inactive slots. Keeping the reassembly/CPU-owner terms deliberately
+conservatively double-counts payload storage; actual heap sizes are then charged.
+Views alias storage.
 This is not a process-RSS/driver-cache/global-memory guarantee. Configuration is
 immutable: callers must retire/drain old instances before same-session replacement.
 No network/settings/renderer wiring or throughput promise is added. App compilation

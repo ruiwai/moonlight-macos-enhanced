@@ -383,9 +383,27 @@ static void testPooledSignsAndPlanes()
     CHECK(validate(frame(session(), qPlanes))); // 11meta+9planes+1sign =>6 words.
 }
 
+static void testPayloadLease()
+{
+    auto pool = std::make_shared<PayloadPool>();
+    const Bytes good = frame(session());
+    Bytes bytes(good.size() + 16, 0xa5, Bytes::allocator_type(pool));
+    std::copy(good.begin(), good.end(), bytes.begin());
+    CHECK(CodecBytesAllocationSize(bytes) == PayloadPool::SlotBytes);
+    auto validator = CodecValidator::Create(session()); CHECK(validator);
+    const auto *p = bytes.data();
+    CHECK(!validator->ValidateOwned(std::move(bytes), good.size() - 1, envelope()));
+    CHECK(bytes.data() == p && bytes.back() == 0xa5);
+    auto result = validator->ValidateOwned(std::move(bytes), good.size(), envelope());
+    CHECK(result && result->bytes().data() == p);
+    CHECK(std::equal(good.begin(), good.end(), result->bytes().begin()));
+    CHECK(std::all_of(result->bytes().begin() + good.size(), result->bytes().end(),
+                      [](uint8_t b) { return b == 0; }));
+}
 int main()
 {
     testOverwriteBytes();
+    testPayloadLease();
     testOwnedTransferAndCache();
     testOwnedBounds();
     testValidAndOwnership();
