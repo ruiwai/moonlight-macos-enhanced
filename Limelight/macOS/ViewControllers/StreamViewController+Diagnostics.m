@@ -2039,17 +2039,27 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
     }
     
     // Approximate stage sum, not input-to-photon latency. PyroWave wall time is not GPU decode time.
-    append([NSString stringWithFormat:@"  |  %@ %@ ", MLString(@"Pipeline", nil), MLString(@"Host", nil)], labelAttrs);
-    append(!pyrowave && stats.framesWithHostProcessingLatency > 0 ? [NSString stringWithFormat:@"%.1f ms", encodeTime] : @"--", valueAttrs);
-    append(@" → Net ", labelAttrs);
-    append(hasTransportEstimate ? [NSString stringWithFormat:@"~%.1f ms", transportOneWayMs] : @"--", valueAttrs);
-    append(@" → Decode ", labelAttrs);
-    append(!pyrowave && stats.decodedFrames > 0 ? [NSString stringWithFormat:@"%.2f ms", decodeTime] : @"--", valueAttrs);
-    append(@" → Queue ", labelAttrs);
-    append(!pyrowave && stats.renderedFrames > 0 ? [NSString stringWithFormat:@"%.2f ms", renderTime] : @"--", valueAttrs);
-    append(@" | Total ", labelAttrs);
-    append(!pyrowave && stats.framesWithHostProcessingLatency > 0 && stats.decodedFrames > 0 && stats.renderedFrames > 0 && hasTransportEstimate
-           ? [NSString stringWithFormat:@"~%.1f ms", encodeTime + transportOneWayMs + decodeTime + renderTime] : @"--", valueAttrs);
+    NSMutableArray<NSString *> *stages = [NSMutableArray array];
+    if (!pyrowave && stats.framesWithHostProcessingLatency > 0) {
+        [stages addObject:[NSString stringWithFormat:@"%@ %.1f ms", MLString(@"Host", nil), encodeTime]];
+    }
+    if (hasTransportEstimate) {
+        [stages addObject:[NSString stringWithFormat:@"Net %.1f ms", transportOneWayMs]];
+    }
+    if (!pyrowave && stats.decodedFrames > 0) {
+        [stages addObject:[NSString stringWithFormat:@"Decode %.2f ms", decodeTime]];
+    }
+    if (!pyrowave && stats.renderedFrames > 0) {
+        [stages addObject:[NSString stringWithFormat:@"Queue %.2f ms", renderTime]];
+    }
+    if (stages.count > 0) {
+        append([NSString stringWithFormat:@"  |  %@ ", MLString(@"Pipeline", nil)], labelAttrs);
+        append([stages componentsJoinedByString:@" → "], valueAttrs);
+    }
+    if (!pyrowave && stats.framesWithHostProcessingLatency > 0 && stats.decodedFrames > 0 && stats.renderedFrames > 0 && hasTransportEstimate) {
+        append(@" | Total ", labelAttrs);
+        append([NSString stringWithFormat:@"%.1f ms", encodeTime + transportOneWayMs + decodeTime + renderTime], valueAttrs);
+    }
 
     if (self.streamHealthNoPayloadStreak > 0) {
         append(@"  |  Stall ", labelAttrs);
