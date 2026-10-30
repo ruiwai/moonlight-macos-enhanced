@@ -10,6 +10,12 @@
 #import <IOKit/hid/IOHIDElement.h>
 #import <IOKit/hidsystem/IOLLEvent.h>
 #include "ControllerShortcutAdapter.h"
+#include "HIDRelativeMotionPolicy.h"
+
+typedef int (^HIDRelativeChunkSender)(int16_t, int16_t);
+static int HIDSendRelativeChunk(void *opaque, int16_t x, int16_t y) {
+    return (*(HIDRelativeChunkSender __strong *)opaque)(x, y);
+}
 
 
 NSString *const HIDMouseModeToggledNotification = @"HIDMouseModeToggledNotification";
@@ -449,6 +455,12 @@ static short HIDVirtualKeyForTypedCharacter(UniChar character) {
 @end
 
 @implementation HIDSupport {
+    // Residuals are inputQueue-owned; the atomic epoch invalidates queued motion.
+    HIDRelativeMotionResidual _relativeMotionResiduals[3]; // GC, CoreHID, AppKit
+    uint64_t _relativeMotionEpoch;
+    uint64_t _wheelEpoch; // Atomic invalidation; wheel residuals stay inputQueue-owned.
+    uint64_t _relativeMotionQueueEpoch;
+    NSUInteger _relativeMotionLastSource;
     // Mac key code -> packed (VK, flags) of the key-down that is still held.
     // Guarded by _pressedKeyPairsLock inside serial inputQueue blocks only.
     // Tracks successful enqueues; failed releases remain available for cleanup.
@@ -488,11 +500,14 @@ static short HIDVirtualKeyForTypedCharacter(UniChar character) {
         self.controller.menuGesture = gesture;
     }
     __atomic_store_n(&_shouldSendInputEvents, enabled, __ATOMIC_RELEASE);
+    if (wasEnabled != enabled) [self resetPointerInputLifecycle];
     if (!wasEnabled && enabled && self.controllerDriver == 0) [self sendControllerEvent];
 }
 
 - (void)setInputContext:(void *)inputContext {
+    BOOL changed = _inputContext != inputContext;
     _inputContext = inputContext;
+    if (changed) [self resetPointerInputLifecycle];
     [self syncScrollTraceDiagnosticsPreferenceToInputContext];
 }
 
@@ -512,7 +527,6 @@ static short HIDVirtualKeyForTypedCharacter(UniChar character) {
         self.activeScrollTraceId = 0;
         self.activeScrollTraceStartedMs = 0;
         self.activeScrollTraceLastEventMs = 0;
-        self.activeScrollTraceLockedToPrecise = NO;
         self.activeScrollTraceSource = nil;
         self.inputDiagnosticsMouseMoveEvents = 0;
         self.inputDiagnosticsNonZeroRelativeEvents = 0;
@@ -618,7 +632,6 @@ static short HIDVirtualKeyForTypedCharacter(UniChar character) {
             }
             self.activeScrollTraceId = self.scrollTraceSequence;
             self.activeScrollTraceStartedMs = nowMs;
-            self.activeScrollTraceLockedToPrecise = NO;
             self.activeScrollTraceSource = [source copy];
             startsNewTrace = YES;
         } else if (source != nil) {
@@ -1301,6 +1314,7 @@ static unsigned short HIDPositionalKeyCode(unsigned short macKeyCode) {
 }
 
 - (void)keyDown:(NSEvent *)event {
+    if (event.isARepeat) return;
     if (self.shouldSendInputEvents) {
         [self syncKeyboardModifierStateForEvent:event];
         char modifiers = [self translateKeyModifierWithEvent:event];
@@ -1311,12 +1325,10 @@ static unsigned short HIDPositionalKeyCode(unsigned short macKeyCode) {
 
         NSNumber *macKey = @(event.keyCode);
         uint32_t mappedPair = [self keyPairForMacKeyCode:event.keyCode];
-        BOOL isRepeat = event.isARepeat;
         HIDDispatchInput(self, inputCtx, ^{
             [_pressedKeyPairsLock lock];
             NSNumber *held = _pressedKeyPairs[macKey];
-            // Auto-repeat keeps the pair of the original successful press.
-            uint32_t pair = held != nil && isRepeat ? held.unsignedIntValue : mappedPair;
+            uint32_t pair = mappedPair;
             if (held != nil && held.unsignedIntValue != pair) {
                 uint32_t previousPair = held.unsignedIntValue;
                 int err = LiSendKeyboardEvent2Ctx(inputCtx, HIDKeyPairKeyCode(previousPair), KEY_ACTION_UP, 0,
@@ -1637,6 +1649,7 @@ static unsigned short HIDPositionalKeyCode(unsigned short macKeyCode) {
         return;
     }
 
+    [self resetPointerInputLifecycle];
     for (GCMouse *mouse in GCMouse.mice) {
         [self unregisterMouseCallbacks:mouse];
         [self registerMouseCallbacks:mouse];
@@ -1669,19 +1682,19 @@ static unsigned short HIDPositionalKeyCode(unsigned short macKeyCode) {
     self.coreHIDMouseDidDeliverMovement = NO;
     self.coreHIDMouseDriver = [[CoreHIDMouseDriver alloc] init];
     self.coreHIDMouseDriver.delegate = self;
-    self.coreHIDMouseDriver.maximumReportRate = [SettingsClass coreHIDMaxMouseReportRateFor:self.host.uuid];
     self.coreHIDMouseDriver.requestsListenAccessIfNeeded = NO;
     [SettingsClass updateMouseInputRuntimeStatusFor:self.host.uuid
                                         summaryKey:@"Mouse Runtime Path CoreHID Pending"
                                          detailKey:@"Mouse Runtime Detail CoreHID Pending"];
-    Log(LOG_I, @"CoreHID mouse setup: strategy=%ld maxRate=%d requestAccess=%d",
+    // The legacy report-rate preference remains serialized but is inactive.
+    Log(LOG_I, @"CoreHID mouse setup: strategy=%ld immediate-notifications requestAccess=%d",
         (long)[SettingsClass mouseDriverFor:self.host.uuid],
-        self.coreHIDMouseDriver.maximumReportRate,
         self.coreHIDMouseDriver.requestsListenAccessIfNeeded ? 1 : 0);
     [self.coreHIDMouseDriver start];
 }
 
 - (void)tearDownCoreHIDMouseDriver {
+    [self resetPointerInputLifecycle];
     if (self.coreHIDMouseDriver == nil) {
         return;
     }
@@ -1693,47 +1706,94 @@ static unsigned short HIDPositionalKeyCode(unsigned short macKeyCode) {
     HIDInvalidateCoreHIDFreeMouseAbsoluteSync(self);
 }
 
+- (uint64_t)inputMotionEpoch {
+    return __atomic_load_n(&_relativeMotionEpoch, __ATOMIC_ACQUIRE);
+}
+
+- (void)resetRelativeMouseMotion {
+    // Relative-only invalidation, including ordinary absolute reports/suppression.
+    __atomic_add_fetch(&_relativeMotionEpoch, 1, __ATOMIC_ACQ_REL);
+}
+
+- (uint64_t)inputWheelEpoch {
+    return __atomic_load_n(&_wheelEpoch, __ATOMIC_ACQUIRE);
+}
+
+- (void)resetMouseWheel {
+    __atomic_add_fetch(&_wheelEpoch, 1, __ATOMIC_ACQ_REL);
+}
+
+- (void)resetPointerInputLifecycle {
+    [self resetRelativeMouseMotion];
+    [self resetMouseWheel];
+}
+
 - (void)dispatchRelativeMouseDeltaX:(CGFloat)deltaX
                              deltaY:(CGFloat)deltaY
                           sourceTag:(NSString *)sourceTag {
-    if (deltaX == 0.0 && deltaY == 0.0) {
-        return;
-    }
-
+    uint64_t epoch = __atomic_load_n(&_relativeMotionEpoch, __ATOMIC_ACQUIRE);
     if (!self.shouldSendInputEvents) {
+        [self resetRelativeMouseMotion];
         return;
     }
 
     if ([self.precisionTouchpad shouldSuppressPointerMotion]) {
+        [self resetRelativeMouseMotion];
         return;
     }
 
     PML_INPUT_STREAM_CONTEXT inputCtx = HIDInputContext(self);
     if (!HIDValidateInputContext(inputCtx, "dispatchRelativeMouseDelta")) {
+        [self resetRelativeMouseMotion];
         return;
     }
 
     NSInteger touchscreenMode = [SettingsClass touchscreenModeFor:self.host.uuid];
     if (HIDShouldUseAbsolutePointerPath(self, touchscreenMode)) {
+        [self resetRelativeMouseMotion];
         return;
     }
 
     BOOL suppressed = HIDShouldSuppressRelativeMouse(self);
     CGFloat sensitivity = HIDPointerSensitivityForHost(self.host);
-    short moveX = HIDScaledRelativeDelta(deltaX, sensitivity);
-    short moveY = HIDScaledRelativeDelta(deltaY, sensitivity);
-    [self recordRelativeInputDiagnosticsFrom:sourceTag
-                                   rawDeltaX:deltaX
-                                   rawDeltaY:deltaY
-                                  sentDeltaX:(suppressed ? 0 : moveX)
-                                  sentDeltaY:(suppressed ? 0 : moveY)
-                                  suppressed:suppressed];
-    if (suppressed || (moveX == 0 && moveY == 0)) {
+    if (suppressed) {
+        [self resetRelativeMouseMotion];
+        if (isfinite(deltaX) && isfinite(deltaY) && fabs(deltaX) < INT_MAX && fabs(deltaY) < INT_MAX)
+            [self recordRelativeInputDiagnosticsFrom:sourceTag rawDeltaX:deltaX rawDeltaY:deltaY
+                                          sentDeltaX:0 sentDeltaY:0 suppressed:YES];
         return;
     }
 
+    NSUInteger source = [sourceTag isEqualToString:@"gcMouse"] ? 0 :
+                        [sourceTag isEqualToString:@"coreHIDMouse"] ? 1 : 2;
     HIDDispatchInput(self, inputCtx, ^{
-        LiSendMouseMoveEventCtx(inputCtx, moveX, moveY);
+        if (epoch != __atomic_load_n(&_relativeMotionEpoch, __ATOMIC_ACQUIRE) ||
+            !self.shouldSendInputEvents || self.inputContext != inputCtx) return;
+        if (_relativeMotionQueueEpoch != epoch || _relativeMotionLastSource != source) {
+            memset(_relativeMotionResiduals, 0, sizeof(_relativeMotionResiduals));
+            _relativeMotionQueueEpoch = epoch;
+            _relativeMotionLastSource = source;
+        }
+        __block BOOL recorded = NO;
+        HIDRelativeChunkSender sender = ^int(int16_t x, int16_t y) {
+            int err = LiSendMouseMoveEventCtx(inputCtx, x, y);
+            [self recordRelativeInputDiagnosticsFrom:sourceTag
+                rawDeltaX:recorded ? 0 : deltaX rawDeltaY:recorded ? 0 : deltaY
+                sentDeltaX:err ? 0 : x sentDeltaY:err ? 0 : y suppressed:NO];
+            recorded = YES;
+            return err;
+        };
+        int err = HIDSubmitRelativeMotion(&_relativeMotionResiduals[source],
+                                          deltaX * sensitivity, deltaY * sensitivity,
+                                          HIDSendRelativeChunk, &sender);
+        if (err != 0) Log(LOG_W, @"[mouse] %@ relative rejected/enqueue failed: %d", sourceTag, err);
+        if (!recorded && err == 0)
+            [self recordRelativeInputDiagnosticsFrom:sourceTag rawDeltaX:deltaX rawDeltaY:deltaY
+                                          sentDeltaX:0 sentDeltaY:0 suppressed:NO];
+        if (source == 0 && recorded && err == 0)
+            [SettingsClass updateMouseInputRuntimeStatusFor:self.host.uuid
+                summaryKey:@"Mouse Runtime Path GameController Active"
+                detailKey:@"Mouse Runtime Detail GameController Active"];
     });
 }
 
@@ -1776,10 +1836,12 @@ static unsigned short HIDPositionalKeyCode(unsigned short macKeyCode) {
                                                                     deltaY:deltaY
                                                                  sourceTag:@"coreHIDVirtualFreeMouse"];
     if (dispatchedVirtualFreeMouse) {
+        [self resetRelativeMouseMotion];
         HIDInvalidateCoreHIDFreeMouseAbsoluteSync(self);
         return;
     }
     if (HIDShouldUseCoreHIDFreeMouseAbsoluteSync(self) && self.freeMouseAbsoluteSyncHandler != nil) {
+        [self resetRelativeMouseMotion];
         if (!self.coreHIDFreeMouseAbsoluteSyncScheduled) {
             self.coreHIDFreeMouseAbsoluteSyncScheduled = YES;
             uint64_t scheduleToken = ++self.coreHIDFreeMouseAbsoluteSyncToken;
@@ -1812,6 +1874,7 @@ static unsigned short HIDPositionalKeyCode(unsigned short macKeyCode) {
     NSString *safeMessage = messageKey.length > 0 ? messageKey : @"CoreHID Mouse input failed.";
     NSInteger configuredStrategy = [SettingsClass mouseDriverFor:self.host.uuid];
     self.coreHIDMouseRuntimeFailed = YES;
+    [self resetPointerInputLifecycle];
     if ([safeReason isEqualToString:@"permission-denied"]) {
         [[InputMonitoringPermissionManager sharedManager] noteCoreHIDPermissionFailureWithMessage:safeMessage];
     }

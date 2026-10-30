@@ -101,14 +101,12 @@ static inline double HIDBlendFreeMouseGain(double currentGain, double rawDelta, 
 @implementation HIDSupport (Pointer)
 
 - (void)suppressRelativeMouseMotionForMilliseconds:(uint64_t)durationMs {
-    if (durationMs == 0) {
-        self.suppressRelativeMouseUntilMs = 0;
-        return;
-    }
-    self.suppressRelativeMouseUntilMs = LiGetMillis() + durationMs;
+    self.suppressRelativeMouseUntilMs = durationMs == 0 ? 0 : LiGetMillis() + durationMs;
+    [self resetRelativeMouseMotion];
 }
 
 - (void)setFreeMouseVirtualCursorActive:(BOOL)active {
+    if (self.freeMouseVirtualCursorRequestedActive != active) [self resetPointerInputLifecycle];
     self.freeMouseVirtualCursorRequestedActive = active;
     if (active) {
         return;
@@ -119,6 +117,7 @@ static inline double HIDBlendFreeMouseGain(double currentGain, double rawDelta, 
 }
 
 - (void)resetFreeMouseVirtualCursorState {
+    [self resetRelativeMouseMotion];
     @synchronized (self.freeMouseVirtualCursorLock) {
         self.freeMouseVirtualCursorHasAnchor = NO;
         self.freeMouseVirtualCursorPoint = NSZeroPoint;
@@ -251,65 +250,6 @@ static inline double HIDBlendFreeMouseGain(double currentGain, double rawDelta, 
     return YES;
 }
 
-- (void)dispatchPendingCoalescedAbsolutePointerPosition {
-    __block short hostX = 0;
-    __block short hostY = 0;
-    __block short referenceWidth = 0;
-    __block short referenceHeight = 0;
-    __block NSString *source = nil;
-    __block BOOL hasPending = NO;
-
-    @synchronized (self.inputDiagnosticsLock) {
-        if (self.pendingCoalescedAbsolutePointerValid) {
-            hostX = self.pendingCoalescedAbsolutePointerHostX;
-            hostY = self.pendingCoalescedAbsolutePointerHostY;
-            referenceWidth = self.pendingCoalescedAbsolutePointerReferenceWidth;
-            referenceHeight = self.pendingCoalescedAbsolutePointerReferenceHeight;
-            source = [self.pendingCoalescedAbsolutePointerSource copy];
-            self.pendingCoalescedAbsolutePointerValid = NO;
-            hasPending = YES;
-        } else {
-            self.pendingCoalescedAbsolutePointerDispatch = NO;
-        }
-    }
-
-    if (!hasPending) {
-        return;
-    }
-
-    PML_INPUT_STREAM_CONTEXT inputCtx = HIDInputContext(self);
-    if (HIDValidateInputContext(inputCtx, "dispatchPendingCoalescedAbsolutePointerPosition") &&
-        self.shouldSendInputEvents) {
-        if (source.length > 0) {
-            [self recordAbsoluteInputDiagnosticsFrom:source
-                                                   x:hostX
-                                                   y:hostY
-                                               width:referenceWidth
-                                              height:referenceHeight];
-        }
-        LiSendMousePositionEventCtx(inputCtx, hostX, hostY, referenceWidth, referenceHeight);
-    }
-
-    BOOL shouldScheduleNext = NO;
-    @synchronized (self.inputDiagnosticsLock) {
-        self.pendingCoalescedAbsolutePointerDispatch = NO;
-        if (self.pendingCoalescedAbsolutePointerValid) {
-            self.pendingCoalescedAbsolutePointerDispatch = YES;
-            shouldScheduleNext = YES;
-        }
-    }
-
-    if (shouldScheduleNext) {
-        PML_CONNECTION_CONTEXT connCtx = inputCtx != NULL ? inputCtx->connectionContext : NULL;
-        dispatch_async(self.inputQueue, ^{
-            if (connCtx != NULL) {
-                LiSetThreadConnectionContext(connCtx);
-            }
-            [self dispatchPendingCoalescedAbsolutePointerPosition];
-        });
-    }
-}
-
 - (void)sendCoalescedAbsoluteMousePositionForViewPoint:(NSPoint)viewPoint
                                          referenceSize:(NSSize)referenceSize
                                          clampToBounds:(BOOL)clampToBounds
@@ -337,53 +277,15 @@ static inline double HIDBlendFreeMouseGain(double currentGain, double rawDelta, 
         return;
     }
 
-    BOOL shouldSchedule = NO;
-    BOOL isDuplicate = NO;
-    @synchronized (self.inputDiagnosticsLock) {
-        BOOL matchesLastKnown = hostX == self.lastAbsolutePointerHostX &&
-                                hostY == self.lastAbsolutePointerHostY &&
-                                referenceWidth == self.lastAbsolutePointerReferenceWidth &&
-                                referenceHeight == self.lastAbsolutePointerReferenceHeight;
-        BOOL matchesPending = self.pendingCoalescedAbsolutePointerValid &&
-                              hostX == self.pendingCoalescedAbsolutePointerHostX &&
-                              hostY == self.pendingCoalescedAbsolutePointerHostY &&
-                              referenceWidth == self.pendingCoalescedAbsolutePointerReferenceWidth &&
-                              referenceHeight == self.pendingCoalescedAbsolutePointerReferenceHeight;
-        if (matchesLastKnown || matchesPending) {
-            isDuplicate = YES;
-            if (self.inputDiagnosticsEnabled) {
-                self.inputDiagnosticsAbsoluteDuplicateSkips += 1;
-            }
-        } else {
-            self.lastAbsolutePointerHostX = hostX;
-            self.lastAbsolutePointerHostY = hostY;
-            self.lastAbsolutePointerReferenceWidth = referenceWidth;
-            self.lastAbsolutePointerReferenceHeight = referenceHeight;
-            self.lastAbsolutePointerAtMs = LiGetMillis();
-            self.lastAbsolutePointerSource = [sourceTag copy];
-            self.pendingCoalescedAbsolutePointerHostX = hostX;
-            self.pendingCoalescedAbsolutePointerHostY = hostY;
-            self.pendingCoalescedAbsolutePointerReferenceWidth = referenceWidth;
-            self.pendingCoalescedAbsolutePointerReferenceHeight = referenceHeight;
-            self.pendingCoalescedAbsolutePointerSource = [sourceTag copy];
-            self.pendingCoalescedAbsolutePointerValid = YES;
-            if (!self.pendingCoalescedAbsolutePointerDispatch) {
-                self.pendingCoalescedAbsolutePointerDispatch = YES;
-                shouldSchedule = YES;
-            }
-        }
-    }
-
-    if (isDuplicate || !shouldSchedule) {
-        return;
-    }
-
-    PML_CONNECTION_CONTEXT connCtx = inputCtx->connectionContext;
-    dispatch_async(self.inputQueue, ^{
-        if (connCtx != NULL) {
-            LiSetThreadConnectionContext(connCtx);
-        }
-        [self dispatchPendingCoalescedAbsolutePointerPosition];
+    // Do not deduplicate against shared diagnostics: semantic input may intervene.
+    // Common handles adjacent absolute coalescing after serial submission.
+    NSString *source = [sourceTag copy];
+    HIDDispatchInput(self, inputCtx, ^{
+        if (!self.shouldSendInputEvents || self.inputContext != inputCtx) return;
+        [self recordAbsoluteInputDiagnosticsFrom:source x:hostX y:hostY
+                                          width:referenceWidth height:referenceHeight];
+        int err = LiSendMousePositionEventCtx(inputCtx, hostX, hostY, referenceWidth, referenceHeight);
+        if (err != 0) Log(LOG_W, @"[mouse] absolute enqueue failed: %d", err);
     });
 }
 
@@ -441,13 +343,15 @@ static inline double HIDBlendFreeMouseGain(double currentGain, double rawDelta, 
 }
 
 -(void)registerMouseCallbacks:(GCMouse *)mouse API_AVAILABLE(macos(11.0)) {
+    [self resetPointerInputLifecycle];
     NSMapTable<GCMouse *, HIDSupport *> *owners = HIDGCMouseCallbackOwners();
     @synchronized (owners) {
         [owners setObject:self forKey:mouse];
         if (self.useGCMouse) {
             mouse.mouseInput.mouseMovedHandler = ^(GCMouseInput * _Nonnull mouse, float deltaX, float deltaY) {
-                self.mouseDeltaX += deltaX;
-                self.mouseDeltaY -= deltaY;
+                [self dispatchRelativeMouseDeltaX:deltaX / HIDGCMouseRelativeSpeedDivisor
+                                          deltaY:-deltaY / HIDGCMouseRelativeSpeedDivisor
+                                       sourceTag:@"gcMouse"];
             };
         
             mouse.mouseInput.leftButton.pressedChangedHandler = ^(GCControllerButtonInput * _Nonnull button, float value, BOOL pressed) {
@@ -537,22 +441,17 @@ static inline double HIDBlendFreeMouseGain(double currentGain, double rawDelta, 
             }
         }
 
+        // AppKit is the sole wheel source for every driver (both axes).
         if (mouse.mouseInput.scroll != nil) {
-            if (self.useGCMouse) {
-                mouse.mouseInput.scroll.valueChangedHandler = nil;
-                mouse.mouseInput.scroll.yAxis.valueChangedHandler = ^(GCControllerAxisInput * _Nonnull axis, float value) {
-                    (void)axis;
-                    [self handleGCMouseScrollValueY:value];
-                };
-            } else {
-                mouse.mouseInput.scroll.valueChangedHandler = nil;
-                mouse.mouseInput.scroll.yAxis.valueChangedHandler = nil;
-            }
+            mouse.mouseInput.scroll.valueChangedHandler = nil;
+            mouse.mouseInput.scroll.xAxis.valueChangedHandler = nil;
+            mouse.mouseInput.scroll.yAxis.valueChangedHandler = nil;
         }
     }
 }
 
 -(void)unregisterMouseCallbacks:(GCMouse*)mouse API_AVAILABLE(macos(11.0)) {
+    [self resetPointerInputLifecycle];
     NSMapTable<GCMouse *, HIDSupport *> *owners = HIDGCMouseCallbackOwners();
     @synchronized (owners) {
         if ([owners objectForKey:mouse] != self) {
@@ -571,6 +470,7 @@ static inline double HIDBlendFreeMouseGain(double currentGain, double rawDelta, 
 
         if (mouse.mouseInput.scroll != nil) {
             mouse.mouseInput.scroll.valueChangedHandler = nil;
+            mouse.mouseInput.scroll.xAxis.valueChangedHandler = nil;
             mouse.mouseInput.scroll.yAxis.valueChangedHandler = nil;
         }
     }
@@ -588,51 +488,6 @@ static CVReturn displayLinkOutputCallback(CVDisplayLinkRef displayLink,
         return kCVReturnError;
     }
 
-    CGFloat deltaX, deltaY;
-    deltaX = me.mouseDeltaX;
-    deltaY = me.mouseDeltaY;
-    if (deltaX != 0 || deltaY != 0) {
-        me.mouseDeltaX = 0;
-        me.mouseDeltaY = 0;
-        if (me.shouldSendInputEvents) {
-            PML_INPUT_STREAM_CONTEXT inputCtx = HIDInputContext(me);
-            if (!inputCtx) {
-                return kCVReturnSuccess;
-            }
-            NSInteger touchscreenMode = [SettingsClass touchscreenModeFor:me.host.uuid];
-            BOOL useAbsolutePointerPath = HIDShouldUseAbsolutePointerPath(me, touchscreenMode);
-            if (!useAbsolutePointerPath) {
-                BOOL suppressed = HIDShouldSuppressRelativeMouse(me);
-                if (suppressed) {
-                    [me recordRelativeInputDiagnosticsFrom:@"gcMouse"
-                                                 rawDeltaX:deltaX
-                                                 rawDeltaY:deltaY
-                                                sentDeltaX:0
-                                                sentDeltaY:0
-                                                suppressed:YES];
-                    return kCVReturnSuccess;
-                }
-                CGFloat normalizedDeltaX = deltaX / HIDGCMouseRelativeSpeedDivisor;
-                CGFloat normalizedDeltaY = deltaY / HIDGCMouseRelativeSpeedDivisor;
-                CGFloat sensitivity = HIDPointerSensitivityForHost(me.host);
-                short moveX = HIDScaledRelativeDelta(normalizedDeltaX, sensitivity);
-                short moveY = HIDScaledRelativeDelta(normalizedDeltaY, sensitivity);
-                [me recordRelativeInputDiagnosticsFrom:@"gcMouse"
-                                             rawDeltaX:deltaX
-                                             rawDeltaY:deltaY
-                                            sentDeltaX:moveX
-                                            sentDeltaY:moveY
-                                            suppressed:NO];
-                HIDDispatchInput(me, inputCtx, ^{
-                    LiSendMouseMoveEventCtx(inputCtx, moveX, moveY);
-                });
-                [SettingsClass updateMouseInputRuntimeStatusFor:me.host.uuid
-                                                    summaryKey:@"Mouse Runtime Path GameController Active"
-                                                     detailKey:@"Mouse Runtime Detail GameController Active"];
-            }
-        }
-    }
-    
     // Mouse Emulation Movement
     if (me.controller.isMouseMode && me.shouldSendInputEvents) {
         PML_INPUT_STREAM_CONTEXT inputCtx = HIDInputContext(me);
@@ -828,6 +683,7 @@ static CVReturn displayLinkOutputCallback(CVDisplayLinkRef displayLink,
     }
 
     if ([self.precisionTouchpad shouldSuppressPointerMotion]) {
+        [self resetRelativeMouseMotion];
         return;
     }
 
@@ -844,6 +700,7 @@ static CVReturn displayLinkOutputCallback(CVDisplayLinkRef displayLink,
     }
 
     if (useAbsolutePointerPath) {
+        [self resetRelativeMouseMotion];
         short hostX = 0;
         short hostY = 0;
         short referenceWidth = 0;
@@ -908,18 +765,6 @@ static CVReturn displayLinkOutputCallback(CVDisplayLinkRef displayLink,
         return;
     }
 
-    if (hostX == self.lastAbsolutePointerHostX &&
-        hostY == self.lastAbsolutePointerHostY &&
-        referenceWidth == self.lastAbsolutePointerReferenceWidth &&
-        referenceHeight == self.lastAbsolutePointerReferenceHeight) {
-        if (self.inputDiagnosticsEnabled) {
-            @synchronized (self.inputDiagnosticsLock) {
-                self.inputDiagnosticsAbsoluteDuplicateSkips += 1;
-            }
-        }
-        return;
-    }
-
     [self recordAbsoluteInputDiagnosticsFrom:@"sendAbsoluteMousePosition"
                                            x:hostX
                                            y:hostY
@@ -971,19 +816,6 @@ static CVReturn displayLinkOutputCallback(CVDisplayLinkRef displayLink,
                                                                    &hostY,
                                                                    &referenceWidth,
                                                                    &referenceHeight);
-    if (shouldSendAbsolute &&
-        hostX == self.lastAbsolutePointerHostX &&
-        hostY == self.lastAbsolutePointerHostY &&
-        referenceWidth == self.lastAbsolutePointerReferenceWidth &&
-        referenceHeight == self.lastAbsolutePointerReferenceHeight) {
-        if (self.inputDiagnosticsEnabled) {
-            @synchronized (self.inputDiagnosticsLock) {
-                self.inputDiagnosticsAbsoluteDuplicateSkips += 1;
-            }
-        }
-        shouldSendAbsolute = NO;
-    }
-
     if (pressed) {
         self.pressedMouseButtonsMask |= HIDMouseButtonBitForButton(button);
         [self recordMouseButtonDiagnosticsAction:@"press"
@@ -1074,15 +906,21 @@ static CVReturn displayLinkOutputCallback(CVDisplayLinkRef displayLink,
         mode = (stored == MLPrecisionTouchpadModeBlock || stored == MLPrecisionTouchpadModeBoth)
             ? (MLPrecisionTouchpadMode)stored : MLPrecisionTouchpadModeOff;
     }
-    self.precisionTouchpad.mode = mode;
+    if (self.precisionTouchpad.mode != mode) {
+        self.precisionTouchpad.mode = mode;
+        [self resetPointerInputLifecycle];
+    }
 }
 
 - (void)handleTrackpadTouchesEvent:(NSEvent *)event inView:(NSView *)view {
+    BOOL wasSuppressed = [self.precisionTouchpad shouldSuppressPointerMotion];
     if (!self.shouldSendInputEvents) {
         [self.precisionTouchpad reset];
-        return;
+    } else {
+        [self.precisionTouchpad handleTouchesEvent:event inView:view];
     }
-    [self.precisionTouchpad handleTouchesEvent:event inView:view];
+    if (wasSuppressed != [self.precisionTouchpad shouldSuppressPointerMotion])
+        [self resetPointerInputLifecycle];
 }
 
 @end

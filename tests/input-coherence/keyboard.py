@@ -37,7 +37,7 @@ enum { KEY_ACTION_DOWN = 3, KEY_ACTION_UP = 4, LOG_W = 2 };
 static NSMutableArray *pending, *calls, *outcomes, *modifierCalls;
 static NSLock *heldLock;
 static BOOL running;
-static int logs;
+static int logs, modifierSyncs, mappings;
 @interface NSEvent : NSObject
 @property unsigned short keyCode;
 @property BOOL isARepeat;
@@ -88,9 +88,9 @@ static int LiSendKeyboardEventCtx(PML_INPUT_STREAM_CONTEXT ctx, short code, char
         self.shouldSendInputEvents = YES; self.hasContext = YES;
     } return self;
 }
-- (void)syncKeyboardModifierStateForEvent:(NSEvent *)event {}
+- (void)syncKeyboardModifierStateForEvent:(NSEvent *)event { modifierSyncs++; }
 - (char)translateKeyModifierWithEvent:(NSEvent *)event { return 5; }
-- (uint32_t)keyPairForMacKeyCode:(unsigned short)key { assert(!running); return self.mappedPair; }
+- (uint32_t)keyPairForMacKeyCode:(unsigned short)key { assert(!running); mappings++; return self.mappedPair; }
 ''' + '\n'.join(methods) + r'''
 @end
 static void step(void) {
@@ -99,7 +99,7 @@ static void step(void) {
 }
 static Fixture *fresh(void) {
     assert(!pending.count); calls = [NSMutableArray array]; outcomes = [NSMutableArray array];
-    modifierCalls = [NSMutableArray array]; logs = 0;
+    modifierCalls = [NSMutableArray array]; logs = modifierSyncs = mappings = 0;
     Fixture *f = [Fixture new]; heldLock = f->_pressedKeyPairsLock; return f;
 }
 static void expect(NSUInteger i, uint32_t pair, int action, int mods, int result) {
@@ -135,11 +135,12 @@ int main(void) { @autoreleasepool {
     puts("PASS: changed pair aborts on failed release; successful release + failed/new down coherence");
 
     f = fresh(); f.mappedPair = a; [f keyDown:e]; step(); f.mappedPair = b;
-    e.isARepeat = YES; [f keyDown:e]; e.isARepeat = NO; step();
-    expect(1, a, 3, 5, 0); held(f, @12, a);
-    e.isARepeat = YES; [outcomes addObject:@(-1)]; [f keyDown:e]; step();
-    held(f, @12, a); e.isARepeat = NO; assert(logs == 1);
-    puts("PASS: captured repeat uses original pair; failed repeat retains successful press");
+    e.isARepeat = YES; [f keyDown:e]; [f keyDown:e];
+    assert(!pending.count && calls.count == 1 && modifierSyncs == 1 && mappings == 1);
+    held(f, @12, a); e.isARepeat = NO; assert(logs == 0);
+    f = fresh(); e.isARepeat = YES; [f keyDown:e]; e.isARepeat = NO;
+    assert(!pending.count && !calls.count && !modifierSyncs && !mappings && !f->_pressedKeyPairs.count);
+    puts("PASS: repeats with/without a held key are ignored before mapping/modifier processing");
 
     f = fresh(); f.mappedPair = a; [f keyDown:e]; step();
     [outcomes addObject:@(-4)]; [f keyUp:e]; step(); held(f, @12, a);

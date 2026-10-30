@@ -149,8 +149,8 @@ Choose the channel layout and audio codec in `Settings → Audio & Microphone`:
 
 - **Free Mouse** (default): for remote desktop and multi-display use; the pointer can leave the stream window for other displays.
 - **Locked Mouse**: for games and other sustained relative movement.
-- The mouse driver defaults to Automatic, choosing in the order `CoreHID → HID → MFI`. `CoreHID` provides high-polling relative movement with a configurable report-rate cap.
-- Local cursor, pointer speed, swapped buttons, and reverse scrolling are supported. Scrolling is configured separately for `physical wheel`, `rewritten / smoothed wheel`, and `trackpad` sources.
+- The mouse driver defaults to Automatic, choosing in the order `CoreHID → HID → MFI`. `CoreHID` provides high-polling relative movement with immediate notifications (the saved report-rate cap is inactive).
+- Local cursor, pointer speed, swapped buttons, and reverse scrolling are supported. AppKit supplies both scroll axes for all mouse drivers using SDL2/Qt wheel semantics; legacy scroll tuning is inactive.
 
 ### Trackpad
 

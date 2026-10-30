@@ -14,6 +14,7 @@
 #import "MoonlightEnhanced-Swift.h"
 #include <limits.h>
 #include <math.h>
+#include "HIDMouseWheelPolicy.h"
 
 #include "Limelight.h"
 #include "Limelight-internal.h"
@@ -43,8 +44,6 @@
 @property (nonatomic) BOOL gamepadMenuPressed;
 @property (nonatomic, strong) NSTimer *gamepadMenuTimer;
 @property (nonatomic) CVDisplayLinkRef displayLink;
-@property (atomic) CGFloat mouseDeltaX;
-@property (atomic) CGFloat mouseDeltaY;
 @property (nonatomic) UInt8 previousLowFreqMotor;
 @property (nonatomic) UInt8 previousHighFreqMotor;
 @property (atomic) UInt16 nextLowFreqMotor;
@@ -112,7 +111,6 @@
 @property (nonatomic) uint64_t activeScrollTraceId;
 @property (nonatomic) uint64_t activeScrollTraceStartedMs;
 @property (nonatomic) uint64_t activeScrollTraceLastEventMs;
-@property (nonatomic) BOOL activeScrollTraceLockedToPrecise;
 @property (nonatomic, copy) NSString *activeScrollTraceSource;
 @property (nonatomic) NSUInteger inputDiagnosticsMouseMoveEvents;
 @property (nonatomic) NSUInteger inputDiagnosticsNonZeroRelativeEvents;
@@ -132,23 +130,10 @@
 @property (nonatomic) short lastAbsolutePointerReferenceHeight;
 @property (nonatomic) uint64_t lastAbsolutePointerAtMs;
 @property (nonatomic, copy) NSString *lastAbsolutePointerSource;
-@property (atomic) BOOL pendingCoalescedAbsolutePointerDispatch;
-@property (atomic) BOOL pendingCoalescedAbsolutePointerValid;
-@property (nonatomic) short pendingCoalescedAbsolutePointerHostX;
-@property (nonatomic) short pendingCoalescedAbsolutePointerHostY;
-@property (nonatomic) short pendingCoalescedAbsolutePointerReferenceWidth;
-@property (nonatomic) short pendingCoalescedAbsolutePointerReferenceHeight;
-@property (nonatomic, copy) NSString *pendingCoalescedAbsolutePointerSource;
 @property (nonatomic) uint32_t pressedMouseButtonsMask;
-@property (nonatomic) CGFloat accumulatedHighResScrollDeltaX;
-@property (nonatomic) CGFloat accumulatedHighResScrollDeltaY;
-@property (nonatomic) CGFloat accumulatedQuantizedWheelDeltaX;
-@property (nonatomic) CGFloat accumulatedQuantizedWheelDeltaY;
-@property (nonatomic) uint64_t accumulatedQuantizedWheelLastEventMsX;
-@property (nonatomic) uint64_t accumulatedQuantizedWheelLastEventMsY;
-@property (nonatomic) NSInteger gcMouseScrollLastClickY;
-@property (nonatomic) uint64_t gcMouseScrollLastEventMsY;
-@property (atomic) uint64_t suppressAppKitScrollUntilMsY;
+// SDL-style residuals and the observed wheel epoch are inputQueue-owned.
+@property (nonatomic) HIDWheelState wheelState;
+@property (nonatomic) uint64_t wheelQueueEpoch;
 
 - (void)sendControllerEvent;
 - (void)updateGamepadMenuGesture;
@@ -188,6 +173,11 @@
                                          y:(short)y
                                      width:(short)width
                                     height:(short)height;
+- (void)resetRelativeMouseMotion;
+- (uint64_t)inputMotionEpoch;
+- (uint64_t)inputWheelEpoch;
+- (void)resetMouseWheel;
+- (void)resetPointerInputLifecycle;
 - (void)dispatchRelativeMouseDeltaX:(CGFloat)deltaX
                              deltaY:(CGFloat)deltaY
                           sourceTag:(NSString *)sourceTag;
@@ -257,54 +247,6 @@
 - (BOOL)writeRumble:(IOHIDDeviceRef)device;
 - (BOOL)writePacket:(IOHIDDeviceRef)device pBuf:(void *)pBuf ucLen:(UInt8)ucLen;
 @end
-
-@interface HIDSupport (ScrollInternal)
-- (void)handleGCMouseScrollValueY:(float)value API_AVAILABLE(macos(11.0));
-@end
-
-typedef NS_OPTIONS(NSUInteger, HIDInputCapabilityMask) {
-    HIDInputCapabilityRelativeMotion = 1UL << 0,
-    HIDInputCapabilityDiscreteVerticalWheel = 1UL << 1,
-    HIDInputCapabilityDiscreteHorizontalWheel = 1UL << 2,
-    HIDInputCapabilityContinuousScrollGesture = 1UL << 3,
-    HIDInputCapabilityExtraButtons = 1UL << 4,
-    HIDInputCapabilityHighReportRate = 1UL << 5,
-    HIDInputCapabilityVendorEnhancementAvailable = 1UL << 6,
-};
-
-typedef NS_ENUM(NSUInteger, HIDInputSourceKind) {
-    HIDInputSourceKindAppKit = 0,
-    HIDInputSourceKindGCMouse = 1,
-    HIDInputSourceKindCoreHID = 2,
-    HIDInputSourceKindFallbackNSEvent = 3,
-};
-
-typedef NS_ENUM(NSUInteger, HIDScrollSemanticKind) {
-    HIDScrollSemanticKindDiscreteWheel = 0,
-    HIDScrollSemanticKindContinuousGestureScroll = 1,
-    HIDScrollSemanticKindHorizontalWheel = 2,
-    HIDScrollSemanticKindSyntheticOrRewrittenScroll = 3,
-};
-
-typedef NS_ENUM(NSInteger, HIDPhysicalWheelModeOption) {
-    HIDPhysicalWheelModeOptionNotched = 0,
-    HIDPhysicalWheelModeOptionHighPrecision = 1,
-    HIDPhysicalWheelModeOptionAutomatic = 2,
-};
-
-typedef NS_ENUM(NSInteger, HIDRewrittenScrollModeOption) {
-    HIDRewrittenScrollModeOptionAdaptive = 0,
-    HIDRewrittenScrollModeOptionNotched = 1,
-    HIDRewrittenScrollModeOptionHighPrecision = 2,
-};
-
-typedef struct {
-    HIDInputSourceKind sourceKind;
-    HIDScrollSemanticKind semanticKind;
-    HIDInputCapabilityMask capabilities;
-    BOOL quantizedWheel;
-    BOOL wheelLikeCandidate;
-} HIDScrollClassification;
 
 static inline UInt16 usbIdFromDevice(IOHIDDeviceRef device, NSString *key) {
     CFTypeRef value = IOHIDDeviceGetProperty(device, (__bridge CFStringRef)key);
@@ -397,71 +339,6 @@ static inline CGFloat HIDPointerSensitivityForHost(TemporaryHost *host) {
         return 1.0;
     }
     return MIN(MAX(sensitivity, 0.25), 3.0);
-}
-
-static inline CGFloat HIDNormalizedScrollSpeed(CGFloat speed, CGFloat fallback) {
-    if (!isfinite(speed) || speed <= 0.0) {
-        return fallback;
-    }
-    return MIN(MAX(speed, 0.1), 4.0);
-}
-
-static inline CGFloat HIDWheelScrollSpeedForHost(TemporaryHost *host) {
-    return HIDNormalizedScrollSpeed([SettingsClass wheelScrollSpeedFor:host.uuid], 1.0);
-}
-
-static inline CGFloat HIDRewrittenScrollSpeedForHost(TemporaryHost *host) {
-    return HIDNormalizedScrollSpeed([SettingsClass rewrittenScrollSpeedFor:host.uuid], 1.0);
-}
-
-static inline CGFloat HIDGestureScrollSpeedForHost(TemporaryHost *host) {
-    return HIDNormalizedScrollSpeed([SettingsClass gestureScrollSpeedFor:host.uuid], 1.0);
-}
-
-static inline CGFloat HIDPhysicalWheelHighPrecisionScaleForHost(TemporaryHost *host) {
-    CGFloat scale = [SettingsClass physicalWheelHighPrecisionScaleFor:host.uuid];
-    if (!isfinite(scale) || scale <= 0.0) {
-        return 7.0;
-    }
-    return MIN(MAX(scale, 1.0), 12.0);
-}
-
-static inline CGFloat HIDSmartWheelTailFilterForHost(TemporaryHost *host) {
-    CGFloat threshold = [SettingsClass smartWheelTailFilterFor:host.uuid];
-    if (!isfinite(threshold) || threshold < 0.0) {
-        return 0.0;
-    }
-    return MIN(MAX(threshold, 0.0), 1.0);
-}
-
-static inline CGFloat HIDPhysicalWheelHighPrecisionScrollSpeed(TemporaryHost *host, CGFloat baseSpeed) {
-    CGFloat normalizedBase = HIDNormalizedScrollSpeed(baseSpeed, 1.0);
-    return normalizedBase * HIDPhysicalWheelHighPrecisionScaleForHost(host);
-}
-
-static inline HIDPhysicalWheelModeOption HIDPhysicalWheelModeForHost(TemporaryHost *host) {
-    return (HIDPhysicalWheelModeOption)[SettingsClass physicalWheelModeFor:host.uuid];
-}
-
-static inline HIDRewrittenScrollModeOption HIDRewrittenScrollModeForHost(TemporaryHost *host) {
-    return (HIDRewrittenScrollModeOption)[SettingsClass rewrittenScrollModeFor:host.uuid];
-}
-
-static inline short HIDScaledRelativeDelta(CGFloat delta, CGFloat sensitivity) {
-    if (delta == 0.0) {
-        return 0;
-    }
-
-    CGFloat scaled = delta * sensitivity;
-    if (scaled > SHRT_MAX) {
-        scaled = SHRT_MAX;
-    } else if (scaled < SHRT_MIN) {
-        scaled = SHRT_MIN;
-    } else if (fabs(scaled) < 1.0) {
-        scaled = scaled > 0.0 ? 1.0 : -1.0;
-    }
-
-    return (short)lrint(scaled);
 }
 
 static inline CGFloat HIDAbsoluteMouseReferencePrecisionScale(NSSize referenceSize) {
@@ -615,340 +492,4 @@ static inline uint32_t HIDMouseButtonBitForButton(int button) {
         default:
             return 0;
     }
-}
-
-static short const HIDScrollWheelDelta = 120;
-// Tight window to catch only true macOS-generated duplicate events
-// (which arrive within a few milliseconds of each other).
-// The old 240/360ms values created a dead zone that dropped ~25% of
-// legitimate scroll events, causing stutter, latency, and missed scrolls.
-static uint64_t const HIDQuantizedWheelDuplicateSuppressMinMs = 25;
-static uint64_t const HIDQuantizedWheelDuplicateSuppressMaxMs = 50;
-// Duration to suppress AppKit scroll events after a GCMouse scroll dispatch.
-// AppKit echoes arrive within ~10ms; 80ms provides a safe margin.
-static uint64_t const HIDGCMouseAppKitSuppressMs = 80;
-static inline NSInteger HIDScrollEventIntegerField(NSEvent *event, CGEventField field) {
-    if (event == nil || event.CGEvent == NULL) {
-        return 0;
-    }
-
-    return (NSInteger)CGEventGetIntegerValueField(event.CGEvent, field);
-}
-
-static inline BOOL HIDScrollEventHasMomentumOrPhase(NSEvent *event) {
-    if (event == nil) {
-        return NO;
-    }
-
-    return event.phase != NSEventPhaseNone || event.momentumPhase != NSEventPhaseNone;
-}
-
-static inline BOOL HIDScrollEventIsContinuous(NSEvent *event, BOOL horizontalDominant) {
-    if (event == nil) {
-        return NO;
-    }
-
-    CGEventField rawField = horizontalDominant ? kCGScrollWheelEventRawDeltaAxis2 : kCGScrollWheelEventRawDeltaAxis1;
-    CGEventField lineField = horizontalDominant ? kCGScrollWheelEventDeltaAxis2 : kCGScrollWheelEventDeltaAxis1;
-    CGEventField pointField = horizontalDominant ? kCGScrollWheelEventPointDeltaAxis2 : kCGScrollWheelEventPointDeltaAxis1;
-    NSInteger continuousField = HIDScrollEventIntegerField(event, kCGScrollWheelEventIsContinuous);
-    NSInteger rawDelta = HIDScrollEventIntegerField(event, rawField);
-    NSInteger lineDelta = HIDScrollEventIntegerField(event, lineField);
-    NSInteger pointDelta = HIDScrollEventIntegerField(event, pointField);
-    BOOL hasMomentumOrPhase = HIDScrollEventHasMomentumOrPhase(event);
-
-    if (hasMomentumOrPhase) {
-        return YES;
-    }
-
-    if (!event.hasPreciseScrollingDeltas) {
-        if (lineDelta != 0 || rawDelta != 0) {
-            return NO;
-        }
-        return continuousField != 0;
-    }
-
-    if (rawDelta != 0) {
-        return NO;
-    }
-
-    if (lineDelta != 0) {
-        return labs(pointDelta) > MAX(labs(lineDelta), 1);
-    }
-
-    if (pointDelta != 0) {
-        return YES;
-    }
-
-    return continuousField != 0;
-}
-
-static inline NSInteger HIDScrollEventDiscreteDeltaForAxis(NSEvent *event,
-                                                           CGEventField rawField,
-                                                           CGEventField lineField,
-                                                           CGFloat fallbackDelta) {
-    NSInteger rawDelta = HIDScrollEventIntegerField(event, rawField);
-    if (rawDelta != 0) {
-        return rawDelta;
-    }
-
-    NSInteger lineDelta = HIDScrollEventIntegerField(event, lineField);
-    if (lineDelta != 0) {
-        return lineDelta;
-    }
-
-    if (!isfinite(fallbackDelta) || fabs(fallbackDelta) < 1.0) {
-        return 0;
-    }
-
-    return fallbackDelta > 0.0 ? 1 : -1;
-}
-
-static inline BOOL HIDScrollEventShouldQuantizePreciseWheel(BOOL hasPreciseDeltas,
-                                                            NSInteger rawWheelDelta,
-                                                            NSInteger lineDelta,
-                                                            NSInteger fixedDeltaRaw,
-                                                            NSEventPhase phase,
-                                                            NSEventPhase momentumPhase) {
-    if (!hasPreciseDeltas) {
-        return NO;
-    }
-
-    if (rawWheelDelta != 0 ||
-        phase != NSEventPhaseNone ||
-        momentumPhase != NSEventPhaseNone) {
-        return NO;
-    }
-
-    return lineDelta != 0 || fixedDeltaRaw != 0;
-}
-
-static inline BOOL HIDScrollEventShouldForceDiscreteWheel(HIDSupport *support,
-                                                          NSEvent *event,
-                                                          NSInteger rawWheelDelta,
-                                                          NSInteger lineDelta,
-                                                          NSInteger fixedDeltaRaw) {
-    if (support.useGCMouse) {
-        return NO;
-    }
-    if (event == nil) {
-        return NO;
-    }
-    if (HIDScrollEventHasMomentumOrPhase(event)) {
-        return NO;
-    }
-    if (event.scrollingDeltaX == 0.0 && event.scrollingDeltaY == 0.0 &&
-        rawWheelDelta == 0 && lineDelta == 0 && fixedDeltaRaw == 0) {
-        return NO;
-    }
-
-    return YES;
-}
-
-static inline HIDScrollClassification HIDClassifyAppKitScrollEvent(HIDSupport *support,
-                                                                   NSEvent *event,
-                                                                   BOOL horizontalDominant,
-                                                                   NSInteger rawWheelDelta,
-                                                                   NSInteger lineDelta,
-                                                                   NSInteger fixedDeltaRaw) {
-    HIDScrollClassification classification;
-    classification.sourceKind = HIDInputSourceKindAppKit;
-    classification.semanticKind = HIDScrollSemanticKindDiscreteWheel;
-    classification.capabilities = 0;
-    classification.quantizedWheel = NO;
-    classification.wheelLikeCandidate = NO;
-
-    if (event == nil) {
-        return classification;
-    }
-
-    BOOL hasMomentumOrPhase = HIDScrollEventHasMomentumOrPhase(event);
-    BOOL continuous = HIDScrollEventIsContinuous(event, horizontalDominant);
-    BOOL quantizedPreciseWheel = HIDScrollEventShouldQuantizePreciseWheel(event.hasPreciseScrollingDeltas,
-                                                                          rawWheelDelta,
-                                                                          lineDelta,
-                                                                          fixedDeltaRaw,
-                                                                          event.phase,
-                                                                          event.momentumPhase);
-    BOOL forceDiscreteWheel = HIDScrollEventShouldForceDiscreteWheel(support,
-                                                                     event,
-                                                                     rawWheelDelta,
-                                                                     lineDelta,
-                                                                     fixedDeltaRaw);
-    BOOL hasNativeWheelFields = rawWheelDelta != 0 || lineDelta != 0 || fixedDeltaRaw != 0;
-    BOOL hasDelta = event.scrollingDeltaX != 0.0 || event.scrollingDeltaY != 0.0;
-    CGFloat dominantAbsDelta = horizontalDominant ? fabs(event.scrollingDeltaX) : fabs(event.scrollingDeltaY);
-    BOOL syntheticTailCandidate = !hasMomentumOrPhase &&
-                                  !continuous &&
-                                  !hasNativeWheelFields &&
-                                  dominantAbsDelta > 0.0 &&
-                                  dominantAbsDelta < 1.0;
-
-    classification.wheelLikeCandidate = forceDiscreteWheel || quantizedPreciseWheel;
-    if (!classification.wheelLikeCandidate &&
-        !continuous &&
-        !hasMomentumOrPhase &&
-        hasDelta &&
-        !hasNativeWheelFields &&
-        dominantAbsDelta >= 1.0) {
-        classification.wheelLikeCandidate = YES;
-    }
-
-    if (continuous && !quantizedPreciseWheel) {
-        classification.semanticKind = HIDScrollSemanticKindContinuousGestureScroll;
-        classification.capabilities |= HIDInputCapabilityContinuousScrollGesture;
-        if (event.hasPreciseScrollingDeltas) {
-            classification.capabilities |= HIDInputCapabilityHighReportRate;
-        }
-        return classification;
-    }
-
-    if (horizontalDominant) {
-        classification.capabilities |= HIDInputCapabilityDiscreteHorizontalWheel;
-        classification.semanticKind = HIDScrollSemanticKindHorizontalWheel;
-    } else {
-        classification.capabilities |= HIDInputCapabilityDiscreteVerticalWheel;
-        classification.semanticKind = HIDScrollSemanticKindDiscreteWheel;
-    }
-
-    if (event.hasPreciseScrollingDeltas) {
-        classification.capabilities |= HIDInputCapabilityHighReportRate;
-    }
-
-    if (classification.wheelLikeCandidate) {
-        classification.quantizedWheel = YES;
-    }
-
-    if (syntheticTailCandidate) {
-        classification.semanticKind = HIDScrollSemanticKindSyntheticOrRewrittenScroll;
-        classification.quantizedWheel = NO;
-        if (event.hasPreciseScrollingDeltas) {
-            classification.capabilities |= HIDInputCapabilityHighReportRate;
-        }
-        classification.capabilities |= HIDInputCapabilityVendorEnhancementAvailable;
-    }
-
-    return classification;
-}
-
-static inline NSString *HIDScrollDiagnosticModeForClassification(HIDScrollClassification classification) {
-    switch (classification.semanticKind) {
-        case HIDScrollSemanticKindContinuousGestureScroll:
-            return @"appkit-continuous-gesture";
-        case HIDScrollSemanticKindHorizontalWheel:
-            return classification.quantizedWheel ? @"appkit-horizontal-wheel" : @"appkit-horizontal-scroll";
-        case HIDScrollSemanticKindSyntheticOrRewrittenScroll:
-            return @"appkit-synthetic-rewritten";
-        case HIDScrollSemanticKindDiscreteWheel:
-        default:
-            return classification.quantizedWheel ? @"appkit-discrete-wheel" : @"appkit-discrete-scroll";
-    }
-}
-
-static inline signed char HIDDeduplicatedScrollClick(HIDSupport *support,
-                                                     signed char clicks,
-                                                     BOOL horizontalAxis,
-                                                     BOOL deduplicateBurst) {
-    if (clicks == 0) {
-        return 0;
-    }
-
-    if (!deduplicateBurst) {
-        return clicks;
-    }
-
-    uint64_t nowMs = LiGetMillis();
-    uint64_t lastEventMs = horizontalAxis ? support.accumulatedQuantizedWheelLastEventMsX
-                                          : support.accumulatedQuantizedWheelLastEventMsY;
-    CGFloat previousClicks = horizontalAxis ? support.accumulatedQuantizedWheelDeltaX
-                                            : support.accumulatedQuantizedWheelDeltaY;
-    BOOL sameDirection = (previousClicks > 0.0 && clicks > 0) ||
-                         (previousClicks < 0.0 && clicks < 0);
-    uint64_t elapsedMs = lastEventMs != 0 && nowMs >= lastEventMs ? (nowMs - lastEventMs) : UINT64_MAX;
-
-    // Suppress only true macOS-generated duplicates that arrive within
-    // a very tight window (< 25ms) in the same direction.  Anything
-    // further apart is a legitimate separate scroll action.
-    if (sameDirection && lastEventMs != 0 && elapsedMs < HIDQuantizedWheelDuplicateSuppressMinMs) {
-        return 0;
-    }
-
-    // Always update timestamp on dispatch so elapsed time is measured
-    // from the most recent dispatched event, not the first one.
-    if (horizontalAxis) {
-        support.accumulatedQuantizedWheelLastEventMsX = nowMs;
-        support.accumulatedQuantizedWheelDeltaX = (CGFloat)clicks;
-    } else {
-        support.accumulatedQuantizedWheelLastEventMsY = nowMs;
-        support.accumulatedQuantizedWheelDeltaY = (CGFloat)clicks;
-    }
-    return clicks;
-}
-
-static inline short HIDDispatchAccumulatedHighResScrollDelta(CGFloat *accumulatedDelta) {
-    if (accumulatedDelta == NULL || !isfinite(*accumulatedDelta)) {
-        if (accumulatedDelta != NULL) {
-            *accumulatedDelta = 0.0;
-        }
-        return 0;
-    }
-
-    CGFloat clamped = *accumulatedDelta;
-    if (clamped > SHRT_MAX) {
-        clamped = SHRT_MAX;
-    } else if (clamped < SHRT_MIN) {
-        clamped = SHRT_MIN;
-    }
-
-    short dispatchedDelta = (short)clamped;
-    *accumulatedDelta -= dispatchedDelta;
-    if (fabs(*accumulatedDelta) < 0.0001) {
-        *accumulatedDelta = 0.0;
-    }
-    return dispatchedDelta;
-}
-
-static inline signed char HIDNormalizedDiscreteScrollClick(CGFloat delta) {
-    if (!isfinite(delta) || delta == 0.0) {
-        return 0;
-    }
-
-    NSInteger clicks = (NSInteger)llround(delta);
-    if (clicks == 0) {
-        clicks = delta > 0.0 ? 1 : -1;
-    }
-    if (clicks > 1) {
-        clicks = 1;
-    } else if (clicks < -1) {
-        clicks = -1;
-    }
-    return (signed char)clicks;
-}
-
-static inline signed char HIDConsumeAccumulatedDiscreteScrollClick(CGFloat *accumulatedDelta) {
-    if (accumulatedDelta == NULL || !isfinite(*accumulatedDelta)) {
-        if (accumulatedDelta != NULL) {
-            *accumulatedDelta = 0.0;
-        }
-        return 0;
-    }
-
-    if (fabs(*accumulatedDelta) < 1.0) {
-        return 0;
-    }
-
-    CGFloat clickValue = *accumulatedDelta > 0.0 ? floor(*accumulatedDelta) : ceil(*accumulatedDelta);
-    NSInteger clicks = (NSInteger)clickValue;
-    if (clicks > 1) {
-        clicks = 1;
-    } else if (clicks < -1) {
-        clicks = -1;
-    }
-
-    *accumulatedDelta -= (CGFloat)clicks;
-    if (fabs(*accumulatedDelta) < 0.0001) {
-        *accumulatedDelta = 0.0;
-    }
-
-    return (signed char)clicks;
 }

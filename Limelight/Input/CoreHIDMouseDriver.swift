@@ -30,24 +30,13 @@ final class CoreHIDMouseDriver: NSObject {
     static let runtimeErrorMessageKey = "CoreHID Mouse input failed."
   }
 
-  private enum ReportRate {
-    static let unlimited = 0
-    static let defaultMaximum = 1000
-    static let maxRate = 8000
-  }
-
   weak var delegate: CoreHIDMouseDriverDelegate?
-  var maximumReportRate = ReportRate.defaultMaximum
   var requestsListenAccessIfNeeded = false
 
   private let stateLock = NSLock()
   private var managerTask: Task<Void, Never>?
-  private var pendingDeltaX = 0.0
-  private var pendingDeltaY = 0.0
-  private var lastDispatchTimestamp: TimeInterval = 0
   private var hasPostedFailure = false
   private var lastMovementEventTimestamp: TimeInterval = 0
-  private var flushTask: Task<Void, Never>?
 
   var secondsSinceLastMovementEvent: TimeInterval {
     stateLock.lock()
@@ -98,11 +87,6 @@ final class CoreHIDMouseDriver: NSObject {
     stateLock.lock()
     managerTask?.cancel()
     managerTask = nil
-    flushTask?.cancel()
-    flushTask = nil
-    pendingDeltaX = 0
-    pendingDeltaY = 0
-    lastDispatchTimestamp = 0
     hasPostedFailure = false
     lastMovementEventTimestamp = 0
     stateLock.unlock()
@@ -267,99 +251,14 @@ final class CoreHIDMouseDriver: NSObject {
   private func reportDelta(deltaX: Double, deltaY: Double) {
     delegate?.coreHIDMouseDriver?(self, didObserveRawDeltaX: deltaX, deltaY: deltaY)
 
-    let maxRate = Self.normalizedMaximumReportRate(maximumReportRate)
-    if maxRate == ReportRate.unlimited {
-      markMovementEventDelivered()
-      delegate?.coreHIDMouseDriver(self, didReceiveDeltaX: deltaX, deltaY: deltaY)
-      return
-    }
-
-    var deltaToDispatch: (x: Double, y: Double)?
-    var flushDelaySeconds: TimeInterval?
-
-    stateLock.lock()
-    pendingDeltaX += deltaX
-    pendingDeltaY += deltaY
-
-    let now = ProcessInfo.processInfo.systemUptime
-    let minimumInterval = 1.0 / Double(maxRate)
-    let elapsed =
-      lastDispatchTimestamp == 0
-      ? TimeInterval.greatestFiniteMagnitude
-      : (now - lastDispatchTimestamp)
-
-    if elapsed >= minimumInterval {
-      deltaToDispatch = (pendingDeltaX, pendingDeltaY)
-      pendingDeltaX = 0
-      pendingDeltaY = 0
-      lastDispatchTimestamp = now
-      flushTask?.cancel()
-      flushTask = nil
-    } else if flushTask == nil {
-      flushDelaySeconds = max(0, minimumInterval - elapsed)
-    }
-    stateLock.unlock()
-
-    if let deltaToDispatch {
-      markMovementEventDelivered()
-      delegate?.coreHIDMouseDriver(self, didReceiveDeltaX: deltaToDispatch.x, deltaY: deltaToDispatch.y)
-    }
-
-    if let flushDelaySeconds {
-      schedulePendingFlush(after: flushDelaySeconds)
-    }
-  }
-
-  private func schedulePendingFlush(after delaySeconds: TimeInterval) {
-    let clampedDelay = max(0, delaySeconds)
-    let delayNanoseconds = UInt64(clampedDelay * 1_000_000_000.0)
-    let task = Task { [weak self] in
-      if delayNanoseconds > 0 {
-        try? await Task.sleep(nanoseconds: delayNanoseconds)
-      }
-      self?.flushPendingDeltaIfNeeded()
-    }
-
-    stateLock.lock()
-    if flushTask == nil {
-      flushTask = task
-      stateLock.unlock()
-      return
-    }
-    stateLock.unlock()
-    task.cancel()
-  }
-
-  private func flushPendingDeltaIfNeeded() {
-    var deltaToDispatch: (x: Double, y: Double)?
-    stateLock.lock()
-    flushTask = nil
-    if pendingDeltaX != 0 || pendingDeltaY != 0 {
-      deltaToDispatch = (pendingDeltaX, pendingDeltaY)
-      pendingDeltaX = 0
-      pendingDeltaY = 0
-      lastDispatchTimestamp = ProcessInfo.processInfo.systemUptime
-    }
-    stateLock.unlock()
-
-    if let deltaToDispatch {
-      markMovementEventDelivered()
-      delegate?.coreHIDMouseDriver(self, didReceiveDeltaX: deltaToDispatch.x, deltaY: deltaToDispatch.y)
-    }
+    markMovementEventDelivered()
+    delegate?.coreHIDMouseDriver(self, didReceiveDeltaX: deltaX, deltaY: deltaY)
   }
 
   private func markMovementEventDelivered() {
     stateLock.lock()
     lastMovementEventTimestamp = ProcessInfo.processInfo.systemUptime
     stateLock.unlock()
-  }
-
-  private static func normalizedMaximumReportRate(_ value: Int) -> Int {
-    let clamped = max(ReportRate.unlimited, min(value, ReportRate.maxRate))
-    if clamped == ReportRate.unlimited {
-      return ReportRate.unlimited
-    }
-    return max(1, clamped)
   }
 
   private func postFailureIfNeeded(reason: String, messageKey: String) {

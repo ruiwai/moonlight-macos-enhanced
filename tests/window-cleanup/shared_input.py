@@ -1,4 +1,4 @@
-"""Extract GC callbacks/physical display block; macOS Foundation fake, not device runtime."""
+"""Extract GC callbacks; macOS Foundation fake, not device/conversion runtime."""
 from pathlib import Path
 import argparse
 import sys
@@ -16,9 +16,6 @@ def method(signature):
         end += 1
     return source[start:end]
 
-internal = (root / 'Limelight/Input/HIDSupport_Internal.h').read_text()
-start = source.index('    CGFloat deltaX, deltaY;', source.index('static CVReturn displayLinkOutputCallback'))
-physical = source[start:source.index('    // Mouse Emulation Movement', start)]
 owner_helper = method('static NSMapTable<GCMouse *, HIDSupport *> *HIDGCMouseCallbackOwners')
 
 fixture = r'''
@@ -47,7 +44,7 @@ typedef void *PML_INPUT_STREAM_CONTEXT;
 @implementation GCControllerAxisInput @end
 @interface Scroll : NSObject
 @property(copy) void (^valueChangedHandler)(void);
-@property GCControllerAxisInput *yAxis;
+@property GCControllerAxisInput *xAxis, *yAxis;
 @end
 @implementation Scroll @end
 @interface GCMouseInput : NSObject
@@ -85,12 +82,11 @@ static int runtimeUpdates;
 @end
 @interface HIDSupport : NSObject
 @property BOOL useGCMouse, shouldSendInputEvents;
-@property (atomic) CGFloat mouseDeltaX, mouseDeltaY;
 @property NSMutableArray *reports;
 @property Host *host;
-@property int scrollEvents;
 @property Touchpad *precisionTouchpad;
-- (void)handleGCMouseScrollValueY:(float)value;
+- (void)resetPointerInputLifecycle;
+- (void)dispatchRelativeMouseDeltaX:(CGFloat)x deltaY:(CGFloat)y sourceTag:(NSString *)source;
 - (void)recordRelativeInputDiagnosticsFrom:(NSString *)source rawDeltaX:(CGFloat)x rawDeltaY:(CGFloat)y sentDeltaX:(short)sx sentDeltaY:(short)sy suppressed:(BOOL)suppressed;
 - (void)registerMouseCallbacks:(GCMouse *)mouse;
 - (void)unregisterMouseCallbacks:(GCMouse *)mouse;
@@ -113,11 +109,14 @@ static void LiSendMouseMoveEventCtx(PML_INPUT_STREAM_CONTEXT ctx, short x, short
 }
 '''
 fixture += source[source.index('static CGFloat const HIDGCMouseRelativeSpeedDivisor'):].split('\n', 1)[0] + '\n'
-helper = internal[internal.index('static inline short HIDScaledRelativeDelta'):]
-fixture += helper[:helper.index('\n}') + 2] + '\n'
-fixture += 'static int physicalDisplay(HIDSupport *me) {\n' + physical + 'return 0;\n}\n'
 implementation = owner_helper + '\n@implementation HIDSupport\n' + r'''
-- (void)handleGCMouseScrollValueY:(float)value { self.scrollEvents++; }
+- (void)resetPointerInputLifecycle {}
+- (void)dispatchRelativeMouseDeltaX:(CGFloat)x deltaY:(CGFloat)y sourceTag:(NSString *)source {
+ assert([source isEqualToString:@"gcMouse"]);
+ if (!self.shouldSendInputEvents) return;
+ [self.reports addObject:@[@(x), @(y)]];
+ HIDDispatchInput(self, HIDInputContext(self), ^{ [inputEvents addObject:@[@"move", @(x), @(y)]]; });
+}
 - (void)recordRelativeInputDiagnosticsFrom:(NSString *)source rawDeltaX:(CGFloat)x rawDeltaY:(CGFloat)y sentDeltaX:(short)sx sentDeltaY:(short)sy suppressed:(BOOL)suppressed {}
 ''' + method('-(void)registerMouseCallbacks:') + '\n' + method('-(void)unregisterMouseCallbacks:') + '\n@end\n'
 checks = r'''
@@ -127,7 +126,11 @@ static GCMouse *device(void) {
  mouse.mouseInput.middleButton=[GCControllerButtonInput new];
  mouse.mouseInput.rightButton=[GCControllerButtonInput new];
  mouse.mouseInput.auxiliaryButtons=@[[GCControllerButtonInput new],[GCControllerButtonInput new]];
- mouse.mouseInput.scroll=[Scroll new]; mouse.mouseInput.scroll.yAxis=[GCControllerAxisInput new];
+ mouse.mouseInput.scroll=[Scroll new];
+ mouse.mouseInput.scroll.xAxis=[GCControllerAxisInput new]; mouse.mouseInput.scroll.yAxis=[GCControllerAxisInput new];
+ mouse.mouseInput.scroll.valueChangedHandler=^{};
+ mouse.mouseInput.scroll.xAxis.valueChangedHandler=^(GCControllerAxisInput *axis, float v) { assert(0); };
+ mouse.mouseInput.scroll.yAxis.valueChangedHandler=^(GCControllerAxisInput *axis, float v) { assert(0); };
  return mouse;
 }
 static HIDSupport *support(void) {
@@ -141,7 +144,9 @@ static void assertHandlers(GCMouse *mouse, BOOL present) {
  for (GCControllerButtonInput *button in mouse.mouseInput.auxiliaryButtons) {
   assert((button.pressedChangedHandler != nil)==present);
  }
- assert((mouse.mouseInput.scroll.yAxis.valueChangedHandler != nil)==present);
+ assert(mouse.mouseInput.scroll.valueChangedHandler == nil);
+ assert(mouse.mouseInput.scroll.xAxis.valueChangedHandler == nil);
+ assert(mouse.mouseInput.scroll.yAxis.valueChangedHandler == nil);
 }
 int main(void) { @autoreleasepool {
  GCMouse *shared=device(), *oldOnly=device();
@@ -152,24 +157,22 @@ int main(void) { @autoreleasepool {
  [old unregisterMouseCallbacks:shared]; assertHandlers(shared, YES);
  shared.mouseInput.mouseMovedHandler(shared.mouseInput, 3, 4);
  shared.mouseInput.leftButton.pressedChangedHandler(shared.mouseInput.leftButton, 1, YES);
- shared.mouseInput.scroll.yAxis.valueChangedHandler(shared.mouseInput.scroll.yAxis, 1);
- assert(current.mouseDeltaX==3 && current.mouseDeltaY==-4 && current.scrollEvents==1 && buttonEvents==1);
- assert(old.mouseDeltaX==0 && old.mouseDeltaY==0 && old.scrollEvents==0);
- assert(!current.reports.count && runtimeUpdates==0); physicalDisplay(current);
- assert(([current.reports isEqualToArray:@[@[@2, @-2]]]) && runtimeUpdates==1);
- assert(current.mouseDeltaX==0 && current.mouseDeltaY==0);
- // Tiny reports aggregate before min1; reversal cancels before Common sees anything.
+ assert(buttonEvents==1 && current.reports.count==1);
+ assert(!old.reports.count && runtimeUpdates==0);
+ assert(([current.reports[0] isEqualToArray:@[@1.2, @-1.6]]));
+ // Every tiny report and reversal reaches the relative dispatcher immediately.
  for (int i=0; i<4; i++) shared.mouseInput.mouseMovedHandler(shared.mouseInput, .25, -.25);
- assert(current.mouseDeltaX==1 && current.mouseDeltaY==1 && current.reports.count==1);
- physicalDisplay(current); assert(([current.reports[1] isEqualToArray:@[@1, @1]]));
+ assert(current.reports.count==5);
+ for (int i=1; i<5; i++) assert(([current.reports[i] isEqualToArray:@[@0.1, @0.1]]));
  shared.mouseInput.mouseMovedHandler(shared.mouseInput, 10, 5);
  shared.mouseInput.mouseMovedHandler(shared.mouseInput, -10, -5);
- physicalDisplay(current); assert(current.reports.count==2 && runtimeUpdates==2);
+ assert(current.reports.count==7);
+ assert(([current.reports[5] isEqualToArray:@[@4, @-2]]));
+ assert(([current.reports[6] isEqualToArray:@[@-4, @2]]));
  current.shouldSendInputEvents=NO; shared.mouseInput.mouseMovedHandler(shared.mouseInput, 3, 4);
- assert(current.mouseDeltaX==3 && current.mouseDeltaY==-4); physicalDisplay(current);
- assert(current.mouseDeltaX==0 && current.mouseDeltaY==0 && current.reports.count==2);
+ assert(current.reports.count==7);
  current.shouldSendInputEvents=YES;
- // Buttons queue in FIFO; physical motion does not enter that queue until display.
+ // Callback snapshots enter the same modeled FIFO before each button pair.
  pending=[NSMutableArray array]; inputEvents=[NSMutableArray array]; deferInput=YES;
  NSArray *buttons=@[shared.mouseInput.leftButton, shared.mouseInput.middleButton,
                     shared.mouseInput.rightButton, shared.mouseInput.auxiliaryButtons[0],
@@ -178,20 +181,17 @@ int main(void) { @autoreleasepool {
   shared.mouseInput.mouseMovedHandler(shared.mouseInput, 1, 2);
   button.pressedChangedHandler(button, 1, YES); button.pressedChangedHandler(button, 0, NO);
  }
- assert(pending.count==10 && !inputEvents.count && buttonEvents==1);
- assert(current.mouseDeltaX==5 && current.mouseDeltaY==-10 && current.reports.count==2);
+ assert(pending.count==15 && !inputEvents.count && buttonEvents==1 && current.reports.count==12);
  current.shouldSendInputEvents=NO; // Already accepted button sends remain queued.
  while (pending.count) { void (^work)(void)=pending[0]; [pending removeObjectAtIndex:0]; work(); }
  for (NSUInteger i=0; i<5; i++) {
-  assert(([inputEvents[2*i] isEqualToArray:@[@(i+1), @1]]));
-  assert(([inputEvents[2*i+1] isEqualToArray:@[@(i+1), @0]]));
+  assert(([inputEvents[3*i] isEqualToArray:@[@"move", @0.4, @-0.8]]));
+  assert(([inputEvents[3*i+1] isEqualToArray:@[@(i+1), @1]]));
+  assert(([inputEvents[3*i+2] isEqualToArray:@[@(i+1), @0]]));
  }
- assert(buttonEvents==11 && current.mouseDeltaX==5 && current.mouseDeltaY==-10);
- current.shouldSendInputEvents=YES; physicalDisplay(current);
- assert(pending.count==1 && current.mouseDeltaX==0 && current.mouseDeltaY==0 && current.reports.count==2);
- void (^move)(void)=pending[0]; [pending removeObjectAtIndex:0]; move(); deferInput=NO;
- assert(([current.reports[2] isEqualToArray:@[@3, @-6]]));
- puts("PASS: five deferred GC button press/release FIFOs; physical motion waits for display (no native motion/key order claim)");
+ assert(buttonEvents==11 && !pending.count && current.reports.count==12);
+ current.shouldSendInputEvents=YES; deferInput=NO;
+ puts("PASS: five deferred GC button FIFOs with immediate normalized motion snapshots (dispatcher modeled)");
  [old unregisterMouseCallbacks:oldOnly]; assertHandlers(oldOnly, NO);
  [current unregisterMouseCallbacks:shared]; assertHandlers(shared, NO);
  [current unregisterMouseCallbacks:shared]; assertHandlers(shared, NO);
@@ -208,7 +208,7 @@ int main(void) { @autoreleasepool {
   [temporary registerMouseCallbacks:shared]; [temporary unregisterMouseCallbacks:shared];
  }
  assert(released==nil);
- puts("PASS: stale mouse cleanup preserves another stream's movement, buttons and scroll");
+ puts("PASS: stale mouse cleanup preserves another stream's movement/buttons; GC wheel stays disabled");
  puts("PASS: owned cleanup, repeated cleanup, driver refresh and owner lifetime");
 } }
 '''
@@ -218,7 +218,7 @@ args = parser.parse_args()
 program = fixture + implementation + checks
 if args.emit:
     args.emit.write_text(program)
-print('PASS: production GC callbacks/physical display extraction (not runtime)', flush=True)
+print('PASS: production GC callback extraction (not runtime)', flush=True)
 if sys.platform != 'darwin':
     print('SKIP: shared-input fake runtime requires macOS Foundation; not executed on ' + sys.platform)
     sys.exit(0)
