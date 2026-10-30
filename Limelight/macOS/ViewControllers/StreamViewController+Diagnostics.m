@@ -1935,9 +1935,7 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
     float renderTime = stats.renderedFrames > 0 ? (float)stats.totalRenderTime / stats.renderedFrames : 0;
     float decodeTime = stats.decodedFrames > 0 ? (float)stats.totalDecodeTime / stats.decodedFrames : 0;
     float encodeTime = stats.framesWithHostProcessingLatency > 0 ? (float)stats.totalHostProcessingLatency / 10.0f / stats.framesWithHostProcessingLatency : 0;
-    float pipelineTime = encodeTime + decodeTime + renderTime;
     BOOL hasTransportEstimate = NO;
-    BOOL streamLatencyApproximate = NO;
     float transportOneWayMs = 0.0f;
     if (rttAvailable) {
         transportOneWayMs = MAX(0.5f, (float)rtt / 2.0f);
@@ -1945,10 +1943,7 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
     } else if (usingPathProbeLatency) {
         transportOneWayMs = MAX(0.5f, (float)pathProbeMs / 2.0f);
         hasTransportEstimate = YES;
-        streamLatencyApproximate = YES;
     }
-    float streamLatencyMs = pipelineTime + transportOneWayMs;
-    BOOL streamLatencyAvailable = !pyrowave && ((pipelineTime > 0.0f) || hasTransportEstimate);
     
     NSMutableAttributedString *attrString = [[NSMutableAttributedString alloc] init];
     
@@ -1997,18 +1992,6 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
     
     // Network
     if (!pyrowave) {
-        append(@"  ", labelAttrs);
-        append(MLString(@"Stream Latency", nil), labelAttrs);
-        append(@" ", labelAttrs);
-        if (streamLatencyAvailable) {
-            if (streamLatencyApproximate) {
-                append(@"~", labelAttrs);
-            }
-            append([NSString stringWithFormat:@"%.1f", streamLatencyMs], valueAttrs);
-            append(@" ms", labelAttrs);
-        } else {
-            append(MLString(@"Not Available", nil), valueAttrs);
-        }
         append(@"  Loss ", labelAttrs);
         append([NSString stringWithFormat:@"%.2f%%", loss], valueAttrs);
     }
@@ -2055,26 +2038,18 @@ static NSString *MLDynamicHdrFallbackDisplayName(int fallback) {
         append([NSString stringWithFormat:@"%u", stats.renderStallCount], valueAttrs);
     }
     
-    // Latency
-    if (!pyrowave) {
-        append(@"  |  ", labelAttrs);
-        append(MLString(@"Pipeline", nil), labelAttrs);
-        append(@" ", labelAttrs);
-        append([NSString stringWithFormat:@"%.2f", pipelineTime], valueAttrs);
-        append(@" ms · ", labelAttrs);
-        append(MLString(@"Host", nil), labelAttrs);
-        append(@" ", labelAttrs);
-        append([NSString stringWithFormat:@"%.1f", encodeTime], valueAttrs);
-        append(@" ms · Decode ", labelAttrs);
-        append([NSString stringWithFormat:@"%.2f", decodeTime], valueAttrs);
-        append(@" ms · Queue ", labelAttrs);
-        append([NSString stringWithFormat:@"%.2f", renderTime], valueAttrs);
-        append(@" ms", labelAttrs);
-    } else if (stats.decodedFrames > 0) {
-        append(@"  |  Submit→complete (wall) ", labelAttrs);
-        append([NSString stringWithFormat:@"%.2f", decodeTime], valueAttrs);
-        append(@" ms", labelAttrs);
-    }
+    // Approximate stage sum, not input-to-photon latency. PyroWave wall time is not GPU decode time.
+    append([NSString stringWithFormat:@"  |  %@ %@ ", MLString(@"Pipeline", nil), MLString(@"Host", nil)], labelAttrs);
+    append(!pyrowave && stats.framesWithHostProcessingLatency > 0 ? [NSString stringWithFormat:@"%.1f ms", encodeTime] : @"--", valueAttrs);
+    append(@" → Net ", labelAttrs);
+    append(hasTransportEstimate ? [NSString stringWithFormat:@"~%.1f ms", transportOneWayMs] : @"--", valueAttrs);
+    append(@" → Decode ", labelAttrs);
+    append(!pyrowave && stats.decodedFrames > 0 ? [NSString stringWithFormat:@"%.2f ms", decodeTime] : @"--", valueAttrs);
+    append(@" → Queue ", labelAttrs);
+    append(!pyrowave && stats.renderedFrames > 0 ? [NSString stringWithFormat:@"%.2f ms", renderTime] : @"--", valueAttrs);
+    append(@" | Total ", labelAttrs);
+    append(!pyrowave && stats.framesWithHostProcessingLatency > 0 && stats.decodedFrames > 0 && stats.renderedFrames > 0 && hasTransportEstimate
+           ? [NSString stringWithFormat:@"~%.1f ms", encodeTime + transportOneWayMs + decodeTime + renderTime] : @"--", valueAttrs);
 
     if (self.streamHealthNoPayloadStreak > 0) {
         append(@"  |  Stall ", labelAttrs);
