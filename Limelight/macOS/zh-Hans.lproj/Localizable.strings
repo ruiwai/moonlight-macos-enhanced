@@ -901,7 +901,7 @@
 "Reconnect Timed Out" = "重连超时";
 "Reconnecting took too long and the connection may have been lost.\nCheck your network or adjust the stream settings." = "重连过程耗时过长，连接可能已断开。\n请检查网络环境或调整设置。";
 "Remove" = "删除";
-"Show Fullscreen Control Ball" = "全屏显示悬浮球";
+"Show Control Ball" = "显示悬浮球";
 "Show Logs" = "显示日志";
 "Source" = "来源";
 "Stalled %lus" = "卡住%lus";
@@ -2604,7 +2604,7 @@
 "Release mouse capture" = "释放鼠标捕获";
 "Toggle performance overlay" = "显示或隐藏性能 HUD";
 "Toggle mouse mode" = "切换鼠标模式";
-"Toggle fullscreen control ball" = "切换全屏悬浮球";
+"Toggle control ball" = "切换悬浮球";
 "Open control center" = "打开 Moonlight 控制中心";
 "Open control center (fullscreen / borderless only)" = "打开控制中心（仅全屏 / 无边框）";
 "Toggle borderless / windowed (advanced)" = "无边框 / 窗口切换（高级）";

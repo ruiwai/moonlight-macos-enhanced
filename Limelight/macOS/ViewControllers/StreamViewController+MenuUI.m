@@ -628,13 +628,7 @@ static MLEdgeMenuDock MLEdgeMenuDockFromExitEdge(MLFreeMouseExitEdge edge) {
 }
 
 - (BOOL)edgeMenuShouldBeVisible {
-    if (![self isWindowFullscreen] && ![self isWindowBorderlessMode]) {
-        return NO;
-    }
-    if (self.hideFullscreenControlBall) {
-        return NO;
-    }
-    return YES;
+    return !self.hideFullscreenControlBall && ([self isWindowFullscreen] || [self isWindowBorderlessMode]);
 }
 
 - (void)updateEdgeMenuButtonTrackingArea {
@@ -1328,8 +1322,6 @@ static MLEdgeMenuDock MLEdgeMenuDockFromExitEdge(MLFreeMouseExitEdge edge) {
         return;
     }
 
-    // Visibility is a function of the window mode alone; the view hierarchy
-    // carries the ball through Space and full-screen transitions.
     BOOL visible = [self edgeMenuShouldBeVisible];
     BOOL changed = self.edgeMenuButton.hidden == visible;
     self.edgeMenuButton.hidden = !visible;
@@ -1342,9 +1334,13 @@ static MLEdgeMenuDock MLEdgeMenuDockFromExitEdge(MLFreeMouseExitEdge edge) {
         [self updateEdgeMenuButtonAppearance];
         [self bringStreamControlsToFront];
     } else {
-        if (self.edgeMenuDragging) {
+        if (changed) {
+            // AppKit may still deliver mouseUp to the original mouseDown target,
+            // even if the shortcut hid the ball before the drag threshold.
             [self.edgeMenuButton cancelPendingInteraction];
             self.edgeMenuDragging = NO;
+            self.edgeMenuPointerInside = NO;
+            self.edgeMenuButtonSuppressNextClick = NO;
         }
         self.edgeMenuButtonExpanded = NO;
         self.edgeMenuTemporaryReleaseActive = NO;
@@ -1568,7 +1564,7 @@ static MLEdgeMenuDock MLEdgeMenuDockFromExitEdge(MLFreeMouseExitEdge edge) {
 
     [windowMenu addItem:[NSMenuItem separatorItem]];
 
-    NSMenuItem *toggleBallItem = [[NSMenuItem alloc] initWithTitle:MLString(@"Show Fullscreen Control Ball", nil) action:@selector(toggleFullscreenControlBallFromMenu:) keyEquivalent:@""];
+    NSMenuItem *toggleBallItem = [[NSMenuItem alloc] initWithTitle:MLString(@"Show Control Ball", nil) action:@selector(toggleFullscreenControlBallFromMenu:) keyEquivalent:@""];
     [self applyShortcut:[self streamShortcutForAction:MLShortcutActionToggleFullscreenControlBall] toMenuItem:toggleBallItem];
     toggleBallItem.target = self;
     toggleBallItem.state = self.hideFullscreenControlBall ? NSControlStateValueOff : NSControlStateValueOn;

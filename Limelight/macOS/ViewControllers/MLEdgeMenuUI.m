@@ -89,6 +89,7 @@
 }
 
 - (void)fireActivationFromTouch {
+    if (self.isHiddenOrHasHiddenAncestor) return;
     CFTimeInterval now = CACurrentMediaTime();
     // The emulated click of the same tap may reach mouseUp too: one activation only.
     if (now - _lastActivationTime < 0.5) {
@@ -115,6 +116,7 @@
     NSPoint translation = [recognizer translationInView:reference];
     switch (recognizer.state) {
         case NSGestureRecognizerStateBegan:
+            if (self.isHiddenOrHasHiddenAncestor) return;
             _touchPanActive = YES;
             _touchGestureTime = CACurrentMediaTime();
             _interactionCancelled = YES;   // the emulated mouse drag of this touch is not the ball's business
@@ -336,8 +338,6 @@
 
 - (void)mouseUp:(NSEvent *)event {
     if (_interactionCancelled) {
-        _interactionCancelled = NO;
-        _dragStarted = NO;
         return;
     }
     [self finishInteractionWithEvent:event];
@@ -363,6 +363,8 @@
 
 - (void)cancelPendingInteraction {
     BOOL wasDragging = _dragStarted;
+    if (_touchPanActive) _touchGestureTime = CACurrentMediaTime();
+    _touchPanActive = NO;
     _dragStarted = NO;
     _interactionCancelled = YES;
     if (wasDragging && self.dragHandler) {

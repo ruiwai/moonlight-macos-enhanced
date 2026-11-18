@@ -196,7 +196,7 @@ final class StreamShortcutProfile: NSObject {
     case togglePerformanceOverlayAction: "Toggle performance overlay"
     case cyclePerformanceOverlayStyleAction: "Cycle performance overlay style"
     case toggleMouseModeAction: "Toggle mouse mode"
-    case toggleFullscreenControlBallAction: "Toggle fullscreen control ball"
+    case toggleFullscreenControlBallAction: "Toggle control ball"
     case showDisconnectOptionsAction: "Show Disconnect Options"
     case disconnectStreamAction: "Disconnect from Stream"
     case closeAndQuitAppAction: "Close and Quit App"
@@ -608,7 +608,7 @@ final class KeyboardTranslationProfile: NSObject {
     case localActionToggleMouseMode:
       return "Toggle mouse mode"
     case localActionToggleFullscreenControlBall:
-      return "Toggle fullscreen control ball"
+      return "Toggle control ball"
     case localActionShowDisconnectOptions:
       return "Show Disconnect Options"
     case localActionDisconnectStream:

@@ -246,7 +246,7 @@ These shortcuts can be changed in `Settings → Keyboard & Mouse`:
 | `Ctrl` + `Option` | Release mouse capture | While streaming |
 | `Ctrl` + `Option` + `S` | Toggle performance overlay | While streaming |
 | `Ctrl` + `Option` + `M` | Toggle mouse mode | While streaming |
-| `Ctrl` + `Option` + `G` | Toggle fullscreen control ball | Fullscreen only |
+| `Ctrl` + `Option` + `G` | Show or hide the control ball | Shared by fullscreen and borderless modes for this host |
 | `Ctrl` + `Option` + `W` | Disconnect stream | While streaming |
 | `Ctrl` + `Shift` + `W` | Disconnect and quit app | While streaming |
 | `Ctrl` + `Option` + `C` | Open control center | Fullscreen / borderless only |
@@ -278,7 +278,7 @@ Select `DualSense Touchpad Mode` in `Settings → Controller`. With `Hold Option
 
 ## In-Stream Control Center
 
-In fullscreen or borderless mode, press `Ctrl` + `Option` + `C`, or open the control center from the fullscreen control ball or a controller. Its menu is grouped by purpose:
+In fullscreen or borderless mode, press `Ctrl` + `Option` + `C`, or open the control center from the control ball or a controller. Its menu is grouped by purpose:
 
 - **Display**: resolution, frame rate, and host display scale. With Foundation Sunshine, resolution and frame rate apply immediately; otherwise they are applied by reconnecting. The client never changes the host's scale when a stream starts; it only changes when you adjust it here.
 - **Quality and Network**: bitrate and other stream parameters.
