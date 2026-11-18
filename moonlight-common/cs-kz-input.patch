@@ -1,0 +1,2226 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b14e702..fce05a8 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -334,3 +334,32 @@ if (BUILD_TESTING)
+   endif()
+   add_test(NAME pyrowave-reassembly-golden-tests COMMAND pyrowave-reassembly-golden-tests)
+ endif()
++
++# Worker tests include production InputStream.c and stub only transport/clock.
++if(BUILD_TESTING)
++  add_executable(input-stream-policy-test tests/InputStreamPolicyTest.c)
++  target_include_directories(input-stream-policy-test PRIVATE src enet/include)
++  target_compile_definitions(input-stream-policy-test PRIVATE HAS_SOCKLEN_T)
++  add_test(NAME input-stream-policy-test COMMAND input-stream-policy-test)
++  if(UNIX AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
++    find_package(Threads REQUIRED)
++    add_executable(input-stream-worker-test tests/InputStreamWorkerTest.c
++      src/LinkedBlockingQueue.c src/Platform.c)
++    add_executable(linked-blocking-queue-atomic-test tests/LinkedBlockingQueueAtomicTest.c
++      src/LinkedBlockingQueue.c src/Platform.c)
++    foreach(test_target input-stream-worker-test linked-blocking-queue-atomic-test)
++      target_include_directories(${test_target} PRIVATE src enet/include)
++      target_compile_definitions(${test_target} PRIVATE HAS_SOCKLEN_T)
++      target_compile_options(${test_target} PRIVATE -ffunction-sections -fdata-sections
++        -Wall -Wextra -Werror -Wno-unused-parameter)
++      if(APPLE)
++        set_property(TARGET ${test_target} APPEND_STRING PROPERTY LINK_FLAGS " -Wl,-dead_strip")
++      else()
++        set_property(TARGET ${test_target} APPEND_STRING PROPERTY LINK_FLAGS " -Wl,--gc-sections")
++      endif()
++      target_link_libraries(${test_target} PRIVATE Threads::Threads)
++      add_test(NAME ${test_target} COMMAND ${test_target})
++      set_tests_properties(${test_target} PROPERTIES TIMEOUT 20)
++    endforeach()
++  endif()
++endif()
+diff --git a/src/InputQueueExtensions.h b/src/InputQueueExtensions.h
+new file mode 100644
+index 0000000..1c04c4a
+--- /dev/null
++++ b/src/InputQueueExtensions.h
+@@ -0,0 +1,24 @@
++#pragma once
++
++#include "LinkedBlockingQueue.h"
++
++#define LBQ_MERGED 5
++
++// Callbacks run under the queue mutex; they must not reenter queue APIs.
++// LBQ_MERGED leaves the offered item owned by the caller. Successful eviction
++// transfers ownership of *evictedData to the caller; failed offers retain data.
++typedef bool (*PLBQ_TAIL_MERGE_CALLBACK)(void* tailData, void* offeredData, void* context);
++typedef bool (*PLBQ_EVICTION_PREDICATE)(void* data, void* context);
++typedef bool (*PLBQ_POLL_PREDICATE)(void* data, void* context);
++
++int LbqOfferQueueItemWithTailMerge(PLINKED_BLOCKING_QUEUE queueHead, void* data,
++                                   PLINKED_BLOCKING_QUEUE_ENTRY entry,
++                                   PLBQ_TAIL_MERGE_CALLBACK mergeCallback, void* context);
++int LbqOfferQueueItemWithOldestEviction(PLINKED_BLOCKING_QUEUE queueHead, void* data,
++                                        PLINKED_BLOCKING_QUEUE_ENTRY entry,
++                                        PLBQ_EVICTION_PREDICATE evictionPredicate,
++                                        void* context, void** evictedData);
++int LbqPollQueueElementIf(PLINKED_BLOCKING_QUEUE queueHead,
++                          PLBQ_POLL_PREDICATE predicate,
++                          void* context,
++                          void** data);
+diff --git a/src/InputStream.c b/src/InputStream.c
+index 9350e34..c239f86 100644
+--- a/src/InputStream.c
++++ b/src/InputStream.c
+@@ -1,6 +1,8 @@
+ 
+ #include "Limelight-internal.h"
++#include "InputQueueExtensions.h"
+ #include <stddef.h>
++#include "InputStreamPolicy.h"
+ 
+ #ifdef StreamConfig
+ #undef StreamConfig
+@@ -310,6 +312,153 @@ static PPACKET_HOLDER allocatePacketHolder(PML_INPUT_STREAM_CONTEXT ctx, int ext
+   }
+ }
+ 
++static bool mergeQueuedRelativeMouseMove(void* tailData, void* offeredData, void* context) {
++    PPACKET_HOLDER tailHolder = (PPACKET_HOLDER)tailData;
++    PPACKET_HOLDER offeredHolder = (PPACKET_HOLDER)offeredData;
++    int tailDeltaX;
++    int tailDeltaY;
++    int offeredDeltaX;
++    int offeredDeltaY;
++
++    PML_INPUT_STREAM_CONTEXT ctx = context;
++
++    if (tailHolder->channelId != CTRL_CHANNEL_MOUSE ||
++            offeredHolder->channelId != CTRL_CHANNEL_MOUSE ||
++            tailHolder->enetPacketFlags != offeredHolder->enetPacketFlags ||
++            tailHolder->packet.header.magic != offeredHolder->packet.header.magic ||
++            tailHolder->packet.header.magic != (AppVersionQuad[0] >= 5 ?
++                LE32(MOUSE_MOVE_REL_MAGIC_GEN5) : LE32(MOUSE_MOVE_REL_MAGIC))) {
++        return false;
++    }
++
++    tailDeltaX = (short)BE16(tailHolder->packet.mouseMoveRel.deltaX);
++    tailDeltaY = (short)BE16(tailHolder->packet.mouseMoveRel.deltaY);
++    offeredDeltaX = (short)BE16(offeredHolder->packet.mouseMoveRel.deltaX);
++    offeredDeltaY = (short)BE16(offeredHolder->packet.mouseMoveRel.deltaY);
++
++    // A vertical-only report retains the tail's horizontal direction. Only a
++    // non-zero sign reversal ends the current motion segment.
++    if ((tailDeltaX < 0 && offeredDeltaX > 0) ||
++            (tailDeltaX > 0 && offeredDeltaX < 0)) {
++        return false;
++    }
++
++    if (tailDeltaX + offeredDeltaX > INT16_MAX ||
++            tailDeltaX + offeredDeltaX < INT16_MIN ||
++            tailDeltaY + offeredDeltaY > INT16_MAX ||
++            tailDeltaY + offeredDeltaY < INT16_MIN) {
++        return false;
++    }
++
++    tailHolder->packet.mouseMoveRel.deltaX = BE16((short)(tailDeltaX + offeredDeltaX));
++    tailHolder->packet.mouseMoveRel.deltaY = BE16((short)(tailDeltaY + offeredDeltaY));
++    return true;
++}
++
++static bool queuedHolderIsRelativeMouseMove(void* data, void* context) {
++    PPACKET_HOLDER holder = (PPACKET_HOLDER)data;
++
++    PML_INPUT_STREAM_CONTEXT ctx = context;
++
++    return holder->channelId == CTRL_CHANNEL_MOUSE &&
++           holder->packet.header.magic == (AppVersionQuad[0] >= 5 ?
++               LE32(MOUSE_MOVE_REL_MAGIC_GEN5) : LE32(MOUSE_MOVE_REL_MAGIC));
++}
++
++typedef enum _RELATIVE_MOUSE_BATCH_BOUNDARY {
++    RELATIVE_MOUSE_BATCH_CONTINUES,
++    RELATIVE_MOUSE_BATCH_NON_RELATIVE,
++    RELATIVE_MOUSE_BATCH_REVERSAL,
++    RELATIVE_MOUSE_BATCH_OVERFLOW,
++} RELATIVE_MOUSE_BATCH_BOUNDARY;
++
++typedef struct _RELATIVE_MOUSE_BATCH_CONTEXT {
++    uint32_t relativeMouseMagic;
++    int totalDeltaX;
++    int totalDeltaY;
++    RELATIVE_MOUSE_BATCH_BOUNDARY boundary;
++} RELATIVE_MOUSE_BATCH_CONTEXT;
++
++static bool relativeMouseMoveCanBatch(void* data, void* context) {
++    PPACKET_HOLDER holder = (PPACKET_HOLDER)data;
++    RELATIVE_MOUSE_BATCH_CONTEXT* batchContext = (RELATIVE_MOUSE_BATCH_CONTEXT*)context;
++    int partialDeltaX;
++    int partialDeltaY;
++
++    if (holder->packet.header.magic != batchContext->relativeMouseMagic) {
++        batchContext->boundary = RELATIVE_MOUSE_BATCH_NON_RELATIVE;
++        return false;
++    }
++
++    partialDeltaX = (short)BE16(holder->packet.mouseMoveRel.deltaX);
++    partialDeltaY = (short)BE16(holder->packet.mouseMoveRel.deltaY);
++
++    if ((batchContext->totalDeltaX < 0 && partialDeltaX > 0) ||
++            (batchContext->totalDeltaX > 0 && partialDeltaX < 0)) {
++        batchContext->boundary = RELATIVE_MOUSE_BATCH_REVERSAL;
++        return false;
++    }
++
++    if (partialDeltaX + batchContext->totalDeltaX > INT16_MAX ||
++            partialDeltaX + batchContext->totalDeltaX < INT16_MIN ||
++            partialDeltaY + batchContext->totalDeltaY > INT16_MAX ||
++            partialDeltaY + batchContext->totalDeltaY < INT16_MIN) {
++        batchContext->boundary = RELATIVE_MOUSE_BATCH_OVERFLOW;
++        return false;
++    }
++
++    batchContext->boundary = RELATIVE_MOUSE_BATCH_CONTINUES;
++    return true;
++}
++
++static bool packetMagicMatches(void* data, void* context) {
++    PPACKET_HOLDER holder = (PPACKET_HOLDER)data;
++    uint32_t packetMagic = *(uint32_t*)context;
++
++    return holder->packet.header.magic == packetMagic;
++}
++
++// Semantic overload may evict a relative head. Never retain a peeked pointer
++// across an unlocked classification, even when looking for a different type.
++static bool controllerPacketCanBatch(void* data, void* context) {
++    PPACKET_HOLDER next = data;
++    PPACKET_HOLDER current = context;
++    PNV_MULTI_CONTROLLER_PACKET a = &current->packet.multiController;
++    PNV_MULTI_CONTROLLER_PACKET b = &next->packet.multiController;
++    return next->packet.header.magic == current->packet.header.magic &&
++           a->buttonFlags == b->buttonFlags && a->buttonFlags2 == b->buttonFlags2 &&
++           a->controllerNumber == b->controllerNumber &&
++           a->activeGamepadMask == b->activeGamepadMask;
++}
++
++static bool penHoverCanBatch(void* data, void* context) {
++    PPACKET_HOLDER next = data;
++    PPACKET_HOLDER current = context;
++    return next->packet.header.magic == LE32(SS_PEN_MAGIC) &&
++           current->packet.pen.penButtons == next->packet.pen.penButtons &&
++           current->packet.pen.eventType == next->packet.pen.eventType &&
++           current->enetPacketFlags == next->enetPacketFlags;
++}
++
++static int offerSemanticPacketHolder(PML_INPUT_STREAM_CONTEXT ctx, PPACKET_HOLDER holder) {
++    PPACKET_HOLDER evictedHolder = NULL;
++    int err;
++
++    err = LbqOfferQueueItemWithOldestEviction(&ctx->packetQueue, holder, &holder->entry,
++                                             queuedHolderIsRelativeMouseMove, ctx,
++                                             (void**)&evictedHolder);
++    if (evictedHolder != NULL) {
++        freePacketHolder(ctx, evictedHolder);
++    }
++    if (err != LBQ_SUCCESS) {
++        LC_ASSERT(err == LBQ_BOUND_EXCEEDED || err == LBQ_INTERRUPTED);
++        Limelog("Input queue rejected semantic packet: %d\n", err);
++        freePacketHolder(ctx, holder);
++    }
++
++    return err;
++}
++
+ static bool scrollPacketInfoFromHolder(PPACKET_HOLDER holder, bool* horizontal, short* amount) {
+   if (holder == NULL || horizontal == NULL || amount == NULL) {
+     return false;
+@@ -663,8 +812,10 @@ static void inputSendThreadProc(void *context) {
+   uint64_t lastMousePacketTime = 0;
+   uint64_t lastPenPacketTime = 0;
+   uint64_t lastTouchpadFlushTime = 0;
++  bool bypassNextRelativeMouseThrottle = false;
+ 
+   while (!PltIsThreadInterrupted(&ctx->inputSendThread)) {
++    bool flushAfterCurrentPacket = false;
+     bool scrollPacket;
+     bool scrollHorizontal;
+     bool moreData;
+@@ -683,6 +834,10 @@ static void inputSendThreadProc(void *context) {
+       return;
+     }
+ 
++    if (holder->packet.header.magic != relMouseMagicLE) {
++      bypassNextRelativeMouseThrottle = true;
++    }
++
+     scrollPacket = scrollPacketInfoFromHolder(holder, &scrollHorizontal, &scrollAmount);
+     (void)scrollHorizontal;
+     (void)scrollAmount;
+@@ -710,39 +865,13 @@ static void inputSendThreadProc(void *context) {
+       for (;;) {
+         PNV_MULTI_CONTROLLER_PACKET newPkt;
+ 
+-        // Peek at the next packet
+-        if (LbqPeekQueueElement(
+-          &ctx->packetQueue, (void **)&controllerBatchHolder) != LBQ_SUCCESS) {
++        // Preserve the existing button/mask/controller batching boundary.
++        // Classification and removal must be atomic with producer eviction.
++        if (LbqPollQueueElementIf(&ctx->packetQueue, controllerPacketCanBatch,
++                                 holder, (void**)&controllerBatchHolder) != LBQ_SUCCESS) {
+           break;
+         }
+-
+-        // If it's not a controller packet, we're done
+-        if (controllerBatchHolder->packet.header.magic !=
+-            multiControllerMagicLE) {
+-          break;
+-        }
+-
+-        // Check if it's able to be batched
+-        // NB: GFE does some discarding of gamepad packets received very soon
+-        // after another. Thus, this batching is needed for correctness in some
+-        // cases, as GFE will inexplicably drop *newer* packets in that
+-        // scenario. The brokenness can be tested with consecutive calls to
+-        // LiSendMultiControllerEvent() with different values for analog sticks
+-        // (max -> zero).
+         newPkt = &controllerBatchHolder->packet.multiController;
+-        if (newPkt->buttonFlags != origPkt->buttonFlags ||
+-            newPkt->buttonFlags2 != origPkt->buttonFlags2 ||
+-            newPkt->controllerNumber != origPkt->controllerNumber ||
+-            newPkt->activeGamepadMask != origPkt->activeGamepadMask) {
+-          // Batching not allowed
+-          break;
+-        }
+-
+-        // Remove the batchable controller packet
+-        if (LbqPollQueueElement(
+-          &ctx->packetQueue, (void **)&controllerBatchHolder) != LBQ_SUCCESS) {
+-          break;
+-        }
+ 
+         // Update the original packet
+         origPkt->leftTrigger = newPkt->leftTrigger;
+@@ -758,76 +887,58 @@ static void inputSendThreadProc(void *context) {
+ 
+       lastControllerPacketTime[controllerNumber] = now;
+     }
+-    // If it's a relative mouse move packet, we can also do batching
++    // If it's a relative mouse move packet, we can do batching
+     else if (holder->packet.header.magic == relMouseMagicLE) {
+-      uint64_t now = PltGetMillis();
+-
+-      // Delay for batching if required
+-      if (now < lastMousePacketTime + MOUSE_BATCHING_INTERVAL_MS) {
+-        flushInputOnControlStreamCtx(&ctx->connectionContext->controlContext);
+-        PltSleepMs(
+-            (int)(lastMousePacketTime + MOUSE_BATCHING_INTERVAL_MS - now));
+-        now = PltGetMillis();
+-      }
+-
+-      PltLockMutex(&ctx->batchedInputMutex);
+-
+-      // Send as many packets as it takes to get the entire delta through
+-      while (ctx->currentRelativeMouseState.deltaX != 0 ||
+-             ctx->currentRelativeMouseState.deltaY != 0) {
+-        bool more = false;
+-
+-        if (ctx->currentRelativeMouseState.deltaX < INT16_MIN) {
+-          holder->packet.mouseMoveRel.deltaX = BE16(INT16_MIN);
+-          ctx->currentRelativeMouseState.deltaX -= INT16_MIN;
+-          more = true;
+-        } else if (ctx->currentRelativeMouseState.deltaX > INT16_MAX) {
+-          holder->packet.mouseMoveRel.deltaX = BE16(INT16_MAX);
+-          ctx->currentRelativeMouseState.deltaX -= INT16_MAX;
+-          more = true;
+-        } else {
+-          holder->packet.mouseMoveRel.deltaX =
+-              BE16(ctx->currentRelativeMouseState.deltaX);
+-          ctx->currentRelativeMouseState.deltaX = 0;
+-        }
+-
+-        if (ctx->currentRelativeMouseState.deltaY < INT16_MIN) {
+-          holder->packet.mouseMoveRel.deltaY = BE16(INT16_MIN);
+-          ctx->currentRelativeMouseState.deltaY -= INT16_MIN;
+-          more = true;
+-        } else if (ctx->currentRelativeMouseState.deltaY > INT16_MAX) {
+-          holder->packet.mouseMoveRel.deltaY = BE16(INT16_MAX);
+-          ctx->currentRelativeMouseState.deltaY -= INT16_MAX;
+-          more = true;
+-        } else {
+-          holder->packet.mouseMoveRel.deltaY =
+-              BE16(ctx->currentRelativeMouseState.deltaY);
+-          ctx->currentRelativeMouseState.deltaY = 0;
+-        }
++      PPACKET_HOLDER mouseBatchHolder;
++      RELATIVE_MOUSE_BATCH_CONTEXT batchContext = {
++          .relativeMouseMagic = relMouseMagicLE,
++          .totalDeltaX = (short)BE16(holder->packet.mouseMoveRel.deltaX),
++          .totalDeltaY = (short)BE16(holder->packet.mouseMoveRel.deltaY),
++          .boundary = RELATIVE_MOUSE_BATCH_CONTINUES,
++      };
++      bool bypassMouseThrottle = bypassNextRelativeMouseThrottle;
++      uint64_t now;
++
++      bypassNextRelativeMouseThrottle = false;
+ 
+-        // Don't hold the batching lock while we're doing network I/O
+-        PltUnlockMutex(&ctx->batchedInputMutex);
+-
+-        // Encrypt and send the split packet
+-        if (!sendInputPacket(ctx, holder, more)) {
+-          freePacketHolder(ctx, holder);
+-          return;
+-        }
++      for (;;) {
++          int pollResult;
++
++          batchContext.boundary = RELATIVE_MOUSE_BATCH_CONTINUES;
++          pollResult = LbqPollQueueElementIf(&ctx->packetQueue,
++                                             relativeMouseMoveCanBatch,
++                                             &batchContext,
++                                             (void**)&mouseBatchHolder);
++          if (pollResult != LBQ_SUCCESS) {
++              if (batchContext.boundary != RELATIVE_MOUSE_BATCH_CONTINUES) {
++                  flushAfterCurrentPacket = true;
++              }
++              if (batchContext.boundary == RELATIVE_MOUSE_BATCH_REVERSAL ||
++                      batchContext.boundary == RELATIVE_MOUSE_BATCH_OVERFLOW) {
++                  bypassNextRelativeMouseThrottle = true;
++              }
++              break;
++          }
+ 
+-        PltLockMutex(&ctx->batchedInputMutex);
++          batchContext.totalDeltaX += (short)BE16(mouseBatchHolder->packet.mouseMoveRel.deltaX);
++          batchContext.totalDeltaY += (short)BE16(mouseBatchHolder->packet.mouseMoveRel.deltaY);
++          freePacketHolder(ctx, mouseBatchHolder);
+       }
+ 
+-      // The state change is no longer pending
+-      ctx->currentRelativeMouseState.dirty = false;
+-
+-      PltUnlockMutex(&ctx->batchedInputMutex);
++      // Continuous motion remains rate-managed, but a ready semantic
++      // boundary takes priority over the batching delay.
++      now = PltGetMillis();
++      if (!flushAfterCurrentPacket && !bypassMouseThrottle &&
++              now < lastMousePacketTime + MOUSE_BATCHING_INTERVAL_MS) {
++          flushInputOnControlStreamCtx(&ctx->connectionContext->controlContext);
++          PltSleepMs((int)(lastMousePacketTime + MOUSE_BATCHING_INTERVAL_MS - now));
++          now = PltGetMillis();
++      }
+ 
+       lastMousePacketTime = now;
+ 
+-      // We sent everything we needed in the loop above, so we can just free the
+-      // holder of the original packet and wait for another input event.
+-      freePacketHolder(ctx, holder);
+-      continue;
++      holder->packet.mouseMoveRel.deltaX = BE16((short)batchContext.totalDeltaX);
++      holder->packet.mouseMoveRel.deltaY = BE16((short)batchContext.totalDeltaY);
+     }
+     // If it's an absolute mouse move packet, we should only send the latest
+     else if (holder->packet.header.magic == LE32(MOUSE_MOVE_ABS_MAGIC)) {
+@@ -835,33 +946,27 @@ static void inputSendThreadProc(void *context) {
+ 
+       // Delay for batching if required
+       if (now < lastMousePacketTime + MOUSE_BATCHING_INTERVAL_MS) {
+-        flushInputOnControlStreamCtx(&ctx->connectionContext->controlContext);
+-        PltSleepMs(
+-            (int)(lastMousePacketTime + MOUSE_BATCHING_INTERVAL_MS - now));
+-        now = PltGetMillis();
++          flushInputOnControlStreamCtx(&ctx->connectionContext->controlContext);
++          PltSleepMs((int)(lastMousePacketTime + MOUSE_BATCHING_INTERVAL_MS - now));
++          now = PltGetMillis();
+       }
+ 
+-      PltLockMutex(&ctx->batchedInputMutex);
+-
+-      // Populate the packet with the latest state
+-      holder->packet.mouseMoveAbs.x = BE16(ctx->currentAbsoluteMouseState.x);
+-      holder->packet.mouseMoveAbs.y = BE16(ctx->currentAbsoluteMouseState.y);
+-
+-      // There appears to be a rounding error in GFE's scaling calculation which
+-      // prevents the cursor from reaching the far edge of the screen when
+-      // streaming at smaller resolutions with a higher desktop resolution (like
+-      // streaming 720p with a desktop resolution of 1080p, or streaming
+-      // 720p/1080p with a desktop resolution of 4K). Subtracting one from the
+-      // reference dimensions seems to work around this issue.
+-        holder->packet.mouseMoveAbs.width =
+-          BE16(ctx->currentAbsoluteMouseState.width - 1);
+-        holder->packet.mouseMoveAbs.height =
+-          BE16(ctx->currentAbsoluteMouseState.height - 1);
+-
+-      // The state change is no longer pending
+-      ctx->currentAbsoluteMouseState.dirty = false;
++      for (;;) {
++          PPACKET_HOLDER mouseBatchHolder;
++          uint32_t absoluteMouseMagic = LE32(MOUSE_MOVE_ABS_MAGIC);
++
++          // Only adjacent absolute mouse packets may replace this one.
++          // Any other queued input packet is an ordering barrier.
++          if (LbqPollQueueElementIf(&ctx->packetQueue,
++                                    packetMagicMatches,
++                                    &absoluteMouseMagic,
++                                    (void**)&mouseBatchHolder) != LBQ_SUCCESS) {
++              break;
++          }
+ 
+-      PltUnlockMutex(&ctx->batchedInputMutex);
++          freePacketHolder(ctx, holder);
++          holder = mouseBatchHolder;
++      }
+ 
+       lastMousePacketTime = now;
+     }
+@@ -884,29 +989,8 @@ static void inputSendThreadProc(void *context) {
+         for (;;) {
+           PPACKET_HOLDER penBatchHolder;
+ 
+-          // Peek at the next packet
+-          if (LbqPeekQueueElement(&ctx->packetQueue, (void **)&penBatchHolder) !=
+-              LBQ_SUCCESS) {
+-            break;
+-          }
+-
+-          // If it's not a pen packet, we're done
+-          if (penBatchHolder->packet.header.magic != LE32(SS_PEN_MAGIC)) {
+-            break;
+-          }
+-
+-          // If the buttons, event type, or reliability is different, we cannot batch
+-          if (holder->packet.pen.penButtons !=
+-                  penBatchHolder->packet.pen.penButtons ||
+-              holder->packet.pen.eventType !=
+-                  penBatchHolder->packet.pen.eventType ||
+-              holder->enetPacketFlags != penBatchHolder->enetPacketFlags) {
+-            break;
+-          }
+-
+-          // Remove the next packet
+-          if (LbqPollQueueElement(&ctx->packetQueue, (void **)&penBatchHolder) !=
+-              LBQ_SUCCESS) {
++          if (LbqPollQueueElementIf(&ctx->packetQueue, penHoverCanBatch,
++                                   holder, (void**)&penBatchHolder) != LBQ_SUCCESS) {
+             break;
+           }
+ 
+@@ -1021,7 +1105,10 @@ static void inputSendThreadProc(void *context) {
+     }
+ 
+     // Encrypt and send the input packet
+-    moreData = LbqGetItemCount(&ctx->packetQueue) > 0;
++    moreData = !flushAfterCurrentPacket &&
++               !inputPacketIsFlushBarrier(AppVersionQuad[0], holder->channelId,
++                                          holder->packet.header.magic) &&
++               LbqGetItemCount(&ctx->packetQueue) > 0;
+ 
+     // Flush touchpad frames periodically so a deep queue doesn't delay them
+     if (holder->packet.header.magic == LE32(SS_TOUCHPAD_FRAME_MAGIC) &&
+@@ -1161,66 +1248,51 @@ int stopInputStream(void) {
+ 
+ // Send a mouse move event to the streaming machine
+ int LiSendMouseMoveEventCtx(PML_INPUT_STREAM_CONTEXT ctx, short deltaX, short deltaY) {
+-  PPACKET_HOLDER holder;
+-  int err;
++    PPACKET_HOLDER holder;
++    int err;
+ 
+-  if (!ctx->initialized) {
+-    return -2;
+-  }
+-
+-  if (deltaX == 0 && deltaY == 0) {
+-    return 0;
+-  }
+-
+-  PltLockMutex(&ctx->batchedInputMutex);
++    if (!ctx->initialized) {
++        return -2;
++    }
+ 
+-  // Combine the previous deltas with the new one
+-  ctx->currentRelativeMouseState.deltaX += deltaX;
+-  ctx->currentRelativeMouseState.deltaY += deltaY;
++    if (deltaX == 0 && deltaY == 0) {
++        return 0;
++    }
+ 
+-  // Queue a packet holder if this is the only pending relative mouse event
+-  if (!ctx->currentRelativeMouseState.dirty) {
+     holder = allocatePacketHolder(ctx, 0);
+     if (holder == NULL) {
+-      PltUnlockMutex(&ctx->batchedInputMutex);
+-      return -1;
++        return -1;
+     }
+ 
+     holder->channelId = CTRL_CHANNEL_MOUSE;
+ 
+-    // TODO: Send this as unreliable sequenced when we have a delayed reliable
+-    // retransmission thread and protocol updates to allow us to determine which
+-    // unreliable messages were dropped.
++    // TODO: Send this as unreliable sequenced when we have a delayed reliable retransmission thread
++    // and protocol updates to allow us to determine which unreliable messages were dropped.
+     holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
+ 
+-    holder->packet.mouseMoveRel.header.size =
+-        BE32(sizeof(NV_REL_MOUSE_MOVE_PACKET) - sizeof(uint32_t));
++    holder->packet.mouseMoveRel.header.size = BE32(sizeof(NV_REL_MOUSE_MOVE_PACKET) - sizeof(uint32_t));
+     if (AppVersionQuad[0] >= 5) {
+-      holder->packet.mouseMoveRel.header.magic =
+-          LE32(MOUSE_MOVE_REL_MAGIC_GEN5);
+-    } else {
+-      holder->packet.mouseMoveRel.header.magic = LE32(MOUSE_MOVE_REL_MAGIC);
++        holder->packet.mouseMoveRel.header.magic = LE32(MOUSE_MOVE_REL_MAGIC_GEN5);
+     }
+-
+-    // Remaining fields are set in the input thread based on the latest
+-    // currentRelativeMouseState values
+-
+-    err = LbqOfferQueueItem(&ctx->packetQueue, holder, &holder->entry);
+-    if (err == LBQ_SUCCESS) {
+-      ctx->currentRelativeMouseState.dirty = true;
+-    } else {
+-      LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
+-      Limelog("Input queue reached maximum size limit\n");
+-      freePacketHolder(ctx, holder);
++    else {
++        holder->packet.mouseMoveRel.header.magic = LE32(MOUSE_MOVE_REL_MAGIC);
+     }
+-  } else {
+-    // There's already a packet holder queued to send this event
+-    err = 0;
+-  }
++    holder->packet.mouseMoveRel.deltaX = BE16(deltaX);
++    holder->packet.mouseMoveRel.deltaY = BE16(deltaY);
+ 
+-  PltUnlockMutex(&ctx->batchedInputMutex);
++    err = LbqOfferQueueItemWithTailMerge(&ctx->packetQueue, holder, &holder->entry,
++                                        mergeQueuedRelativeMouseMove, ctx);
++    if (err == LBQ_MERGED) {
++        freePacketHolder(ctx, holder);
++        return LBQ_SUCCESS;
++    }
++    if (err != LBQ_SUCCESS) {
++        LC_ASSERT(err == LBQ_BOUND_EXCEEDED || err == LBQ_INTERRUPTED);
++        Limelog("Input queue reached maximum size limit\n");
++        freePacketHolder(ctx, holder);
++    }
+ 
+-  return err;
++    return err;
+ }
+ 
+ int LiSendMouseMoveEvent(short deltaX, short deltaY) {
+@@ -1228,70 +1300,53 @@ int LiSendMouseMoveEvent(short deltaX, short deltaY) {
+ }
+ 
+ // Send a mouse position update to the streaming machine
+-int LiSendMousePositionEventCtx(PML_INPUT_STREAM_CONTEXT ctx, short x, short y, short referenceWidth,
+-                             short referenceHeight) {
+-  PPACKET_HOLDER holder;
+-  int err;
+-
+-  if (!ctx->initialized) {
+-    return -2;
+-  }
++int LiSendMousePositionEventCtx(PML_INPUT_STREAM_CONTEXT ctx, short x, short y, short referenceWidth, short referenceHeight) {
++    PPACKET_HOLDER holder;
++    int err;
+ 
+-  PltLockMutex(&ctx->batchedInputMutex);
+-
+-  // Overwrite the previous mouse location with the new one
+-  ctx->currentAbsoluteMouseState.x = x;
+-  ctx->currentAbsoluteMouseState.y = y;
+-  ctx->currentAbsoluteMouseState.width = referenceWidth;
+-  ctx->currentAbsoluteMouseState.height = referenceHeight;
++    if (!ctx->initialized) {
++        return -2;
++    }
+ 
+-  // Queue a packet holder if this is the only pending absolute mouse event
+-  if (!ctx->currentAbsoluteMouseState.dirty) {
+     holder = allocatePacketHolder(ctx, 0);
+     if (holder == NULL) {
+-      PltUnlockMutex(&ctx->batchedInputMutex);
+-      return -1;
++        return -1;
+     }
+ 
+     holder->channelId = CTRL_CHANNEL_MOUSE;
+ 
+-    // TODO: Send this as unreliable sequenced when we have a delayed reliable
+-    // retransmission thread
++    // TODO: Send this as unreliable sequenced when we have a delayed reliable retransmission thread
+     holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
+ 
+-    holder->packet.mouseMoveAbs.header.size =
+-        BE32(sizeof(NV_ABS_MOUSE_MOVE_PACKET) - sizeof(uint32_t));
++    holder->packet.mouseMoveAbs.header.size = BE32(sizeof(NV_ABS_MOUSE_MOVE_PACKET) - sizeof(uint32_t));
+     holder->packet.mouseMoveAbs.header.magic = LE32(MOUSE_MOVE_ABS_MAGIC);
++    holder->packet.mouseMoveAbs.x = BE16(x);
++    holder->packet.mouseMoveAbs.y = BE16(y);
+     holder->packet.mouseMoveAbs.unused = 0;
+ 
+-    // Remaining fields are set in the input thread based on the latest
+-    // currentAbsoluteMouseState values
++    // There appears to be a rounding error in GFE's scaling calculation which prevents
++    // the cursor from reaching the far edge of the screen when streaming at smaller
++    // resolutions with a higher desktop resolution (like streaming 720p with a desktop
++    // resolution of 1080p, or streaming 720p/1080p with a desktop resolution of 4K).
++    // Subtracting one from the reference dimensions seems to work around this issue.
++    holder->packet.mouseMoveAbs.width = BE16(referenceWidth - 1);
++    holder->packet.mouseMoveAbs.height = BE16(referenceHeight - 1);
+ 
+     err = LbqOfferQueueItem(&ctx->packetQueue, holder, &holder->entry);
+-    if (err == LBQ_SUCCESS) {
+-      ctx->currentAbsoluteMouseState.dirty = true;
+-    } else {
+-      LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
+-      Limelog("Input queue reached maximum size limit\n");
+-      freePacketHolder(ctx, holder);
++    if (err != LBQ_SUCCESS) {
++        LC_ASSERT(err == LBQ_BOUND_EXCEEDED || err == LBQ_INTERRUPTED);
++        Limelog("Input queue reached maximum size limit\n");
++        freePacketHolder(ctx, holder);
+     }
+-  } else {
+-    // There's already a packet holder queued to send this event
+-    err = 0;
+-  }
+ 
+-  PltUnlockMutex(&ctx->batchedInputMutex);
+-
+-  // This is not thread safe, but it's not a big deal because callers that want
+-  // to use LiSendRelativeMotionAsMousePositionEvent() must not mix these
+-  // function without synchronization (otherwise the state of the cursor on the
+-  // host is undefined anyway).
+-  ctx->absCurrentPosX =
+-      CLAMP(x, 0, referenceWidth - 1) / (float)(referenceWidth - 1);
+-  ctx->absCurrentPosY =
+-      CLAMP(y, 0, referenceHeight - 1) / (float)(referenceHeight - 1);
++    // This is not thread safe, but it's not a big deal because callers that want to
++    // use LiSendRelativeMotionAsMousePositionEvent() must not mix these function
++    // without synchronization (otherwise the state of the cursor on the host is
++    // undefined anyway).
++    ctx->absCurrentPosX = CLAMP(x, 0, referenceWidth - 1) / (float)(referenceWidth - 1);
++    ctx->absCurrentPosY = CLAMP(y, 0, referenceHeight - 1) / (float)(referenceHeight - 1);
+ 
+-  return err;
++    return err;
+ }
+ 
+ int LiSendMousePositionEvent(short x, short y, short referenceWidth, short referenceHeight) {
+@@ -1344,12 +1399,7 @@ int LiSendMouseButtonEventCtx(PML_INPUT_STREAM_CONTEXT ctx, char action, int but
+       LE32(holder->packet.mouseButton.header.magic);
+   holder->packet.mouseButton.button = (uint8_t)button;
+ 
+-  err = LbqOfferQueueItem(&ctx->packetQueue, holder, &holder->entry);
+-  if (err != LBQ_SUCCESS) {
+-    LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
+-    Limelog("Input queue reached maximum size limit\n");
+-    freePacketHolder(ctx, holder);
+-  }
++  err = offerSemanticPacketHolder(ctx, holder);
+ 
+   return err;
+ }
+@@ -1433,12 +1483,7 @@ int LiSendKeyboardEvent2Ctx(PML_INPUT_STREAM_CONTEXT ctx, short keyCode, char ke
+   holder->packet.keyboard.modifiers = modifiers;
+   holder->packet.keyboard.zero2 = 0;
+ 
+-  err = LbqOfferQueueItem(&ctx->packetQueue, holder, &holder->entry);
+-  if (err != LBQ_SUCCESS) {
+-    LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
+-    Limelog("Input queue reached maximum size limit\n");
+-    freePacketHolder(ctx, holder);
+-  }
++  err = offerSemanticPacketHolder(ctx, holder);
+ 
+   return err;
+ }
+@@ -1696,11 +1741,8 @@ int LiSendHighResScrollEventCtx(PML_INPUT_STREAM_CONTEXT ctx, short scrollAmount
+       holder->packet.scroll.zero3 = 0;
+       attachScrollTraceMetadata(ctx, holder, LiGetMillis());
+ 
+-      err = LbqOfferQueueItem(&ctx->packetQueue, holder, &holder->entry);
++      err = offerSemanticPacketHolder(ctx, holder);
+       if (err != LBQ_SUCCESS) {
+-        LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
+-        Limelog("Input queue reached maximum size limit\n");
+-        freePacketHolder(ctx, holder);
+         return err;
+       }
+ 
+@@ -1736,13 +1778,8 @@ int LiSendHighResScrollEventCtx(PML_INPUT_STREAM_CONTEXT ctx, short scrollAmount
+     holder->packet.scroll.zero3 = 0;
+     attachScrollTraceMetadata(ctx, holder, LiGetMillis());
+ 
+-    err = LbqOfferQueueItem(&ctx->packetQueue, holder, &holder->entry);
+-    if (err != LBQ_SUCCESS) {
+-      LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
+-      Limelog("Input queue reached maximum size limit\n");
+-      freePacketHolder(ctx, holder);
+-    }
+-    else {
++    err = offerSemanticPacketHolder(ctx, holder);
++    if (err == LBQ_SUCCESS) {
+       LiNoteScrollTraceQueuedCtx(ctx, LiGetMillis());
+       logScrollTracePacketStage(ctx,
+                                 "queued",
+@@ -1800,13 +1837,8 @@ int LiSendHighResHScrollEventCtx(PML_INPUT_STREAM_CONTEXT ctx, short scrollAmoun
+   holder->packet.hscroll.scrollAmount = BE16(scrollAmount);
+   attachScrollTraceMetadata(ctx, holder, LiGetMillis());
+ 
+-  err = LbqOfferQueueItem(&ctx->packetQueue, holder, &holder->entry);
+-  if (err != LBQ_SUCCESS) {
+-    LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
+-    Limelog("Input queue reached maximum size limit\n");
+-    freePacketHolder(ctx, holder);
+-  }
+-  else {
++  err = offerSemanticPacketHolder(ctx, holder);
++  if (err == LBQ_SUCCESS) {
+     LiNoteScrollTraceQueuedCtx(ctx, LiGetMillis());
+     logScrollTracePacketStage(ctx,
+                               "queued",
+diff --git a/src/InputStreamPolicy.h b/src/InputStreamPolicy.h
+new file mode 100644
+index 0000000..1af09f4
+--- /dev/null
++++ b/src/InputStreamPolicy.h
+@@ -0,0 +1,31 @@
++#pragma once
++
++#include "Limelight-internal.h"
++
++static inline bool inputPacketIsFlushBarrier(int appVersionMajor, uint8_t channelId, uint32_t packetMagic)
++{
++    if (channelId == CTRL_CHANNEL_KEYBOARD) {
++        return true;
++    }
++
++    if (channelId != CTRL_CHANNEL_MOUSE) {
++        return false;
++    }
++
++    if (packetMagic == LE32(KEY_DOWN_EVENT_MAGIC) ||
++            packetMagic == LE32(KEY_UP_EVENT_MAGIC)) {
++        return true;
++    }
++
++    const uint32_t scrollMagic = appVersionMajor >= 5 ?
++        LE32(SCROLL_MAGIC_GEN5) : LE32(SCROLL_MAGIC);
++    const uint32_t mouseButtonDownMagic = appVersionMajor >= 5 ?
++        LE32(MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5) : LE32(BUTTON_ACTION_PRESS);
++    const uint32_t mouseButtonUpMagic = appVersionMajor >= 5 ?
++        LE32(MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5) : LE32(BUTTON_ACTION_RELEASE);
++
++    return packetMagic == scrollMagic ||
++           packetMagic == LE32(SS_HSCROLL_MAGIC) ||
++           packetMagic == mouseButtonDownMagic ||
++           packetMagic == mouseButtonUpMagic;
++}
+diff --git a/src/LinkedBlockingQueue.c b/src/LinkedBlockingQueue.c
+index 54f9a60..ba13023 100644
+--- a/src/LinkedBlockingQueue.c
++++ b/src/LinkedBlockingQueue.c
+@@ -1,4 +1,4 @@
+-#include "LinkedBlockingQueue.h"
++#include "InputQueueExtensions.h"
+ 
+ // Destroy the linked blocking queue and associated mutex and event
+ PLINKED_BLOCKING_QUEUE_ENTRY LbqDestroyLinkedBlockingQueue(PLINKED_BLOCKING_QUEUE queueHead) {
+@@ -79,7 +79,13 @@ void LbqSignalQueueUserWake(PLINKED_BLOCKING_QUEUE queueHead) {
+ }
+ 
+ int LbqGetItemCount(PLINKED_BLOCKING_QUEUE queueHead) {
+-    return queueHead->currentSize;
++    int itemCount;
++
++    PltLockMutex(&queueHead->mutex);
++    itemCount = queueHead->currentSize;
++    PltUnlockMutex(&queueHead->mutex);
++
++    return itemCount;
+ }
+ 
+ int LbqOfferQueueItem(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINKED_BLOCKING_QUEUE_ENTRY entry) {
+@@ -135,6 +141,141 @@ int LbqOfferQueueItems(PLINKED_BLOCKING_QUEUE queueHead, PLINKED_BLOCKING_QUEUE_
+     return LBQ_SUCCESS;
+ }
+ 
++int LbqOfferQueueItemWithTailMerge(PLINKED_BLOCKING_QUEUE queueHead, void* data,
++                                   PLINKED_BLOCKING_QUEUE_ENTRY entry,
++                                   PLBQ_TAIL_MERGE_CALLBACK mergeCallback, void* context) {
++    bool wasEmpty;
++
++    entry->flink = NULL;
++    entry->data = data;
++
++    PltLockMutex(&queueHead->mutex);
++
++    if (queueHead->shutdown || queueHead->draining) {
++        PltUnlockMutex(&queueHead->mutex);
++        return LBQ_INTERRUPTED;
++    }
++
++    // The callback executes while holding the queue mutex, so the consumer
++    // cannot dequeue or free the tail while it is being inspected or updated.
++    if (queueHead->tail != NULL && mergeCallback != NULL &&
++            mergeCallback(queueHead->tail->data, data, context)) {
++        PltUnlockMutex(&queueHead->mutex);
++        return LBQ_MERGED;
++    }
++
++    if (queueHead->currentSize == queueHead->sizeBound) {
++        PltUnlockMutex(&queueHead->mutex);
++        return LBQ_BOUND_EXCEEDED;
++    }
++
++    wasEmpty = queueHead->head == NULL;
++    if (wasEmpty) {
++        LC_ASSERT(queueHead->currentSize == 0);
++        LC_ASSERT(queueHead->tail == NULL);
++        queueHead->head = entry;
++        queueHead->tail = entry;
++        entry->blink = NULL;
++    }
++    else {
++        LC_ASSERT(queueHead->currentSize >= 1);
++        LC_ASSERT(queueHead->head != NULL);
++        queueHead->tail->flink = entry;
++        entry->blink = queueHead->tail;
++        queueHead->tail = entry;
++    }
++
++    queueHead->currentSize++;
++    queueHead->lifetimeSize++;
++    PltUnlockMutex(&queueHead->mutex);
++
++    if (wasEmpty) {
++        // Only call PltSignalConditionVariable() when transitioning from
++        // empty -> non-empty to avoid a useless syscall for each new entry.
++        PltSignalConditionVariable(&queueHead->cond);
++    }
++
++    return LBQ_SUCCESS;
++}
++
++int LbqOfferQueueItemWithOldestEviction(PLINKED_BLOCKING_QUEUE queueHead, void* data,
++                                        PLINKED_BLOCKING_QUEUE_ENTRY entry,
++                                        PLBQ_EVICTION_PREDICATE evictionPredicate,
++                                        void* context, void** evictedData) {
++    PLINKED_BLOCKING_QUEUE_ENTRY evictedEntry = NULL;
++    bool wasEmpty;
++
++    LC_ASSERT(evictedData != NULL);
++    *evictedData = NULL;
++    entry->flink = NULL;
++    entry->data = data;
++
++    PltLockMutex(&queueHead->mutex);
++
++    if (queueHead->shutdown || queueHead->draining) {
++        PltUnlockMutex(&queueHead->mutex);
++        return LBQ_INTERRUPTED;
++    }
++
++    wasEmpty = queueHead->head == NULL;
++    if (queueHead->currentSize == queueHead->sizeBound) {
++        for (evictedEntry = queueHead->head; evictedEntry != NULL; evictedEntry = evictedEntry->flink) {
++            if (evictionPredicate != NULL && evictionPredicate(evictedEntry->data, context)) {
++                break;
++            }
++        }
++
++        if (evictedEntry == NULL) {
++            PltUnlockMutex(&queueHead->mutex);
++            return LBQ_BOUND_EXCEEDED;
++        }
++
++        if (evictedEntry->blink != NULL) {
++            evictedEntry->blink->flink = evictedEntry->flink;
++        }
++        else {
++            queueHead->head = evictedEntry->flink;
++        }
++
++        if (evictedEntry->flink != NULL) {
++            evictedEntry->flink->blink = evictedEntry->blink;
++        }
++        else {
++            queueHead->tail = evictedEntry->blink;
++        }
++
++        queueHead->currentSize--;
++        *evictedData = evictedEntry->data;
++        evictedEntry->flink = NULL;
++        evictedEntry->blink = NULL;
++    }
++
++    if (queueHead->head == NULL) {
++        LC_ASSERT(queueHead->currentSize == 0);
++        LC_ASSERT(queueHead->tail == NULL);
++        queueHead->head = entry;
++        queueHead->tail = entry;
++        entry->blink = NULL;
++    }
++    else {
++        LC_ASSERT(queueHead->currentSize >= 1);
++        LC_ASSERT(queueHead->tail != NULL);
++        queueHead->tail->flink = entry;
++        entry->blink = queueHead->tail;
++        queueHead->tail = entry;
++    }
++
++    queueHead->currentSize++;
++    queueHead->lifetimeSize++;
++    PltUnlockMutex(&queueHead->mutex);
++
++    if (wasEmpty) {
++        PltSignalConditionVariable(&queueHead->cond);
++    }
++
++    return LBQ_SUCCESS;
++}
++
+ // This must be synchronized with LbqFlushQueueItems by the caller
+ int LbqPeekQueueElement(PLINKED_BLOCKING_QUEUE queueHead, void** data) {
+     PltLockMutex(&queueHead->mutex);
+@@ -202,6 +343,54 @@ int LbqPollQueueElement(PLINKED_BLOCKING_QUEUE queueHead, void** data) {
+     return LBQ_SUCCESS;
+ }
+ 
++int LbqPollQueueElementIf(PLINKED_BLOCKING_QUEUE queueHead,
++                          PLBQ_POLL_PREDICATE predicate,
++                          void* context,
++                          void** data) {
++    PLINKED_BLOCKING_QUEUE_ENTRY entry;
++
++    PltLockMutex(&queueHead->mutex);
++
++    if (queueHead->shutdown) {
++        PltUnlockMutex(&queueHead->mutex);
++        return LBQ_INTERRUPTED;
++    }
++
++    if (queueHead->head == NULL) {
++        int err = queueHead->draining ? LBQ_INTERRUPTED : LBQ_NO_ELEMENT;
++        PltUnlockMutex(&queueHead->mutex);
++        return err;
++    }
++
++    // Classification and conditional removal must remain in one critical
++    // section. Queue producers can otherwise merge into or evict the head
++    // after classification while the consumer still holds its data pointer.
++    if (!predicate(queueHead->head->data, context)) {
++        PltUnlockMutex(&queueHead->mutex);
++        return LBQ_NO_ELEMENT;
++    }
++
++    entry = queueHead->head;
++    queueHead->head = entry->flink;
++    queueHead->currentSize--;
++    if (queueHead->head == NULL) {
++        LC_ASSERT(queueHead->currentSize == 0);
++        queueHead->tail = NULL;
++    }
++    else {
++        LC_ASSERT(queueHead->currentSize != 0);
++        queueHead->head->blink = NULL;
++    }
++
++    entry->flink = NULL;
++    entry->blink = NULL;
++    *data = entry->data;
++
++    PltUnlockMutex(&queueHead->mutex);
++
++    return LBQ_SUCCESS;
++}
++
+ int LbqWaitForQueueElement(PLINKED_BLOCKING_QUEUE queueHead, void** data) {
+     PLINKED_BLOCKING_QUEUE_ENTRY entry;
+ 
+diff --git a/tests/InputStreamPolicyTest.c b/tests/InputStreamPolicyTest.c
+new file mode 100644
+index 0000000..797dfa4
+--- /dev/null
++++ b/tests/InputStreamPolicyTest.c
+@@ -0,0 +1,40 @@
++#include "InputStreamPolicy.h"
++
++static int version;
++
++#define CHECK(condition) do { if (!(condition)) { fprintf(stderr, "FAIL: %s (line %d)\n", #condition, __LINE__); return EXIT_FAILURE; } } while (0)
++
++int main(void)
++{
++    version = 7;
++
++    CHECK(inputPacketIsFlushBarrier(version, CTRL_CHANNEL_KEYBOARD,
++                                    LE32(KEY_DOWN_EVENT_MAGIC)));
++    CHECK(inputPacketIsFlushBarrier(version, CTRL_CHANNEL_KEYBOARD,
++                                    LE32(KEY_UP_EVENT_MAGIC)));
++    CHECK(inputPacketIsFlushBarrier(version, CTRL_CHANNEL_MOUSE,
++                                    LE32(SCROLL_MAGIC_GEN5)));
++    CHECK(inputPacketIsFlushBarrier(version, CTRL_CHANNEL_MOUSE,
++                                    LE32(SS_HSCROLL_MAGIC)));
++
++    CHECK(!inputPacketIsFlushBarrier(version, CTRL_CHANNEL_MOUSE,
++                                     LE32(MOUSE_MOVE_REL_MAGIC_GEN5)));
++    CHECK(inputPacketIsFlushBarrier(version, CTRL_CHANNEL_MOUSE,
++                                    LE32(MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5)));
++    CHECK(inputPacketIsFlushBarrier(version, CTRL_CHANNEL_MOUSE,
++                                    LE32(MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5)));
++    CHECK(!inputPacketIsFlushBarrier(version, CTRL_CHANNEL_GENERIC,
++                                     LE32(SCROLL_MAGIC_GEN5)));
++
++    version = 4;
++    CHECK(inputPacketIsFlushBarrier(version, CTRL_CHANNEL_MOUSE,
++                                    LE32(SCROLL_MAGIC)));
++    CHECK(inputPacketIsFlushBarrier(version, CTRL_CHANNEL_MOUSE,
++                                    LE32(BUTTON_ACTION_PRESS)));
++    CHECK(inputPacketIsFlushBarrier(version, CTRL_CHANNEL_MOUSE,
++                                    LE32(BUTTON_ACTION_RELEASE)));
++    CHECK(!inputPacketIsFlushBarrier(version, CTRL_CHANNEL_MOUSE,
++                                     LE32(SCROLL_MAGIC_GEN5)));
++
++    return 0;
++}
+diff --git a/tests/InputStreamWorkerTest.c b/tests/InputStreamWorkerTest.c
+new file mode 100644
+index 0000000..584de1c
+--- /dev/null
++++ b/tests/InputStreamWorkerTest.c
+@@ -0,0 +1,920 @@
++#define PltGetMillis InputStreamWorkerTestGetMillis
++#define PltSleepMs InputStreamWorkerTestSleepMs
++#define flushInputOnControlStreamCtx InputStreamWorkerTestFlushCtx
++#define sendInputPacketOnControlStreamCtx InputStreamWorkerTestSendCtx
++#define flushInputOnControlStream InputStreamWorkerTestFlush
++#define sendInputPacketOnControlStream InputStreamWorkerTestSend
++
++// Include the production implementation so this test exercises the real input
++// worker while replacing only its clock and control-stream boundaries.
++#include "../src/InputStream.c"
++
++#undef PltGetMillis
++#undef PltSleepMs
++#undef flushInputOnControlStreamCtx
++#undef sendInputPacketOnControlStreamCtx
++#undef flushInputOnControlStream
++#undef sendInputPacketOnControlStream
++
++ML_CONNECTION_CONTEXT gConnectionContext;
++static ML_CONNECTION_CONTEXT testConnection;
++static PML_INPUT_STREAM_CONTEXT ctx = &testConnection.inputContext;
++static PML_CONNECTION_CONTEXT threadConnection;
++PML_CONNECTION_CONTEXT LiGetThreadConnectionContext(void) { return threadConnection; }
++void LiSetThreadConnectionContext(PML_CONNECTION_CONTEXT connection) { threadConnection = connection; }
++#define inputSendThread (ctx->inputSendThread)
++#define packetQueue (ctx->packetQueue)
++#define packetHolderFreeList (ctx->packetHolderFreeList)
++#define batchedInputMutex (ctx->batchedInputMutex)
++#define initialized (ctx->initialized)
++#define encryptedControlStream (ctx->encryptedControlStream)
++
++typedef struct _SENT_INPUT {
++    uint32_t magic;
++    short deltaX;
++    short deltaY;
++    short keyCode;
++    short width, height;
++    short scrollAmount;
++    uint8_t button;
++    bool moreData;
++    int sleepCountBeforeSend;
++} SENT_INPUT;
++
++typedef enum _TEST_SCENARIO {
++    TEST_PREQUEUED,
++    TEST_MOUSE_BUTTON_BARRIER,
++    TEST_KEYBOARD_BARRIER,
++    TEST_WHEEL_BARRIER,
++    TEST_HORIZONTAL_REVERSAL,
++    TEST_ARITHMETIC_OVERFLOW,
++    TEST_CONTINUOUS_SAME_DIRECTION,
++    TEST_QUEUE_COMPRESSION,
++    TEST_SATURATED_BUTTON_RELEASE,
++    TEST_SATURATED_KEY_UP,
++    TEST_SATURATED_VERTICAL_WHEEL,
++    TEST_SATURATED_HORIZONTAL_WHEEL,
++    TEST_SEMANTIC_ONLY_REJECTION,
++} TEST_SCENARIO;
++
++static SENT_INPUT sentInputs[MAX_QUEUED_INPUT_PACKETS + 1];
++static int sentInputCount;
++static int enqueueResult;
++static int sleepCount;
++static int flushCount;
++static uint64_t fakeNowMs;
++static TEST_SCENARIO testScenario;
++static int expectedSendCount;
++
++uint64_t InputStreamWorkerTestGetMillis(void) {
++    return fakeNowMs;
++}
++
++uint64_t LiGetMillis(void) { return fakeNowMs; }
++
++void InputStreamWorkerTestSleepMs(int ms) {
++    sleepCount++;
++    fakeNowMs += (uint64_t)ms;
++}
++
++void InputStreamWorkerTestFlush(void) {
++    flushCount++;
++}
++
++int InputStreamWorkerTestSend(unsigned char* data, int length, uint8_t channelId,
++                              uint32_t flags, bool moreData) {
++    NV_INPUT_HEADER* header = (NV_INPUT_HEADER*)data;
++    SENT_INPUT* sent;
++
++    (void)length;
++    (void)channelId;
++    (void)flags;
++
++    if (sentInputCount >= (int)(sizeof(sentInputs) / sizeof(sentInputs[0]))) {
++        return -1;
++    }
++
++    sent = &sentInputs[sentInputCount++];
++    sent->magic = header->magic;
++    sent->moreData = moreData;
++    sent->sleepCountBeforeSend = sleepCount;
++
++    if (header->magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5)) {
++        NV_REL_MOUSE_MOVE_PACKET* mouse = (NV_REL_MOUSE_MOVE_PACKET*)data;
++        sent->deltaX = (short)BE16(mouse->deltaX);
++        sent->deltaY = (short)BE16(mouse->deltaY);
++    }
++    else if (header->magic == LE32(MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5) ||
++            header->magic == LE32(MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5)) {
++        sent->button = ((NV_MOUSE_BUTTON_PACKET*)data)->button;
++    }
++    else if (header->magic == LE32(KEY_UP_EVENT_MAGIC)) {
++        sent->keyCode = LE16(((NV_KEYBOARD_PACKET*)data)->keyCode);
++    }
++    else if (header->magic == LE32(SCROLL_MAGIC_GEN5)) {
++        sent->scrollAmount = (short)BE16(((NV_SCROLL_PACKET*)data)->scrollAmt1);
++    }
++    else if (header->magic == LE32(SS_HSCROLL_MAGIC)) {
++        sent->scrollAmount = (short)BE16(((SS_HSCROLL_PACKET*)data)->scrollAmount);
++    }
++
++    if (header->magic == LE32(MOUSE_MOVE_ABS_MAGIC)) {
++        NV_ABS_MOUSE_MOVE_PACKET* mouse = (NV_ABS_MOUSE_MOVE_PACKET*)data;
++        sent->deltaX = (short)BE16(mouse->x);
++        sent->deltaY = (short)BE16(mouse->y);
++        sent->width = (short)BE16(mouse->width);
++        sent->height = (short)BE16(mouse->height);
++    }
++    if (testScenario == TEST_PREQUEUED) {
++        if (sentInputCount == expectedSendCount) inputSendThread.cancelled = true;
++        return 0;
++    }
++
++    // Queue the barrier only after the first motion has been transmitted. This
++    // puts the next motion inside the worker's one-millisecond throttle window.
++    if (sentInputCount == 1) {
++        if (testScenario == TEST_QUEUE_COMPRESSION) {
++            inputSendThread.cancelled = true;
++        }
++        else if (testScenario == TEST_SATURATED_BUTTON_RELEASE ||
++                 testScenario == TEST_SATURATED_KEY_UP ||
++                 testScenario == TEST_SATURATED_VERTICAL_WHEEL ||
++                 testScenario == TEST_SATURATED_HORIZONTAL_WHEEL) {
++            // This scenario queues all inputs before starting the worker.
++        }
++        else {
++            enqueueResult = LiSendMouseMoveEventCtx(ctx, 6, -2);
++        }
++        if (enqueueResult == LBQ_SUCCESS &&
++                testScenario != TEST_QUEUE_COMPRESSION &&
++                testScenario != TEST_SATURATED_BUTTON_RELEASE &&
++                testScenario != TEST_SATURATED_KEY_UP &&
++                testScenario != TEST_SATURATED_VERTICAL_WHEEL &&
++                testScenario != TEST_SATURATED_HORIZONTAL_WHEEL) {
++            if (testScenario == TEST_MOUSE_BUTTON_BARRIER) {
++                enqueueResult = LiSendMouseButtonEventCtx(ctx, BUTTON_ACTION_PRESS, BUTTON_LEFT);
++            }
++            else if (testScenario == TEST_KEYBOARD_BARRIER) {
++                enqueueResult = LiSendKeyboardEventCtx(ctx, 0x41, KEY_ACTION_UP, 0);
++            }
++            else if (testScenario == TEST_WHEEL_BARRIER) {
++                enqueueResult = LiSendScrollEventCtx(ctx, -1);
++            }
++            else if (testScenario == TEST_HORIZONTAL_REVERSAL) {
++                enqueueResult = LiSendMouseMoveEventCtx(ctx, -2, 3);
++            }
++            else if (testScenario == TEST_ARITHMETIC_OVERFLOW) {
++                enqueueResult = LiSendMouseMoveEventCtx(ctx, INT16_MAX, 3);
++            }
++            else if (testScenario == TEST_CONTINUOUS_SAME_DIRECTION) {
++                enqueueResult = LiSendMouseMoveEventCtx(ctx, 5, 3);
++            }
++        }
++    }
++    else if (testScenario == TEST_HORIZONTAL_REVERSAL && sentInputCount == 3) {
++        enqueueResult = LiSendMouseMoveEventCtx(ctx, -3, 4);
++    }
++    else if (testScenario == TEST_ARITHMETIC_OVERFLOW && sentInputCount == 3) {
++        enqueueResult = LiSendMouseMoveEventCtx(ctx, 1, 4);
++    }
++    else if (sentInputCount == expectedSendCount) {
++        inputSendThread.cancelled = true;
++    }
++
++    return 0;
++}
++
++void InputStreamWorkerTestFlushCtx(PML_CONTROL_STREAM_CONTEXT control) {
++    (void)control;
++    InputStreamWorkerTestFlush();
++}
++
++int InputStreamWorkerTestSendCtx(PML_CONTROL_STREAM_CONTEXT control, unsigned char* data,
++                                int length, uint8_t channelId, uint32_t flags, bool moreData) {
++    if (control != &ctx->connectionContext->controlContext) return -1;
++    return InputStreamWorkerTestSend(data, length, channelId, flags, moreData);
++}
++
++bool PltEncryptMessage(PPLT_CRYPTO_CONTEXT ctx, int algorithm, int flags,
++                       unsigned char* key, int keyLength,
++                       unsigned char* iv, int ivLength,
++                       unsigned char* tag, int tagLength,
++                       unsigned char* inputData, int inputDataLength,
++                       unsigned char* outputData, int* outputDataLength) {
++    (void)ctx;
++    (void)algorithm;
++    (void)flags;
++    (void)key;
++    (void)keyLength;
++    (void)iv;
++    (void)ivLength;
++    (void)tag;
++    (void)tagLength;
++    (void)inputData;
++    (void)inputDataLength;
++    (void)outputData;
++    (void)outputDataLength;
++    return false;
++}
++
++bool isControlDataInTransitCtx(PML_CONTROL_STREAM_CONTEXT control) {
++    (void)control;
++    return false;
++}
++
++static void freeQueueEntries(PLINKED_BLOCKING_QUEUE_ENTRY entry) {
++    while (entry != NULL) {
++        PLINKED_BLOCKING_QUEUE_ENTRY next = entry->flink;
++        free(entry->data);
++        entry = next;
++    }
++}
++
++static void cleanupWorkerState(void) {
++    LbqSignalQueueShutdown(&packetQueue);
++    freeQueueEntries(LbqDestroyLinkedBlockingQueue(&packetQueue));
++
++    LbqSignalQueueShutdown(&packetHolderFreeList);
++    freeQueueEntries(LbqDestroyLinkedBlockingQueue(&packetHolderFreeList));
++
++    PltDeleteMutex(&batchedInputMutex);
++}
++
++static int setupWorkerState(TEST_SCENARIO scenario, int sendCount) {
++    memset(sentInputs, 0, sizeof(sentInputs));
++    sentInputCount = 0;
++    enqueueResult = LBQ_SUCCESS;
++    sleepCount = 0;
++    flushCount = 0;
++    fakeNowMs = 1000;
++    testScenario = scenario;
++    expectedSendCount = sendCount;
++
++    ctx->connectionContext = &testConnection;
++    ctx->needsBatchedScroll = false;
++    encryptedControlStream = true;
++    initialized = true;
++    inputSendThread.cancelled = false;
++
++    if (LbqInitializeLinkedBlockingQueue(&packetQueue, MAX_QUEUED_INPUT_PACKETS) != 0) {
++        return -1;
++    }
++    if (LbqInitializeLinkedBlockingQueue(&packetHolderFreeList, MAX_QUEUED_INPUT_PACKETS) != 0) {
++        return -1;
++    }
++    if (PltCreateMutex(&batchedInputMutex) != 0) {
++        return -1;
++    }
++
++    return 0;
++}
++
++#define CHECK(condition) do { \
++    if (!(condition)) { \
++        fprintf(stderr, "FAIL: %s (line %d)\n", #condition, __LINE__); \
++        result = EXIT_FAILURE; \
++        goto Exit; \
++    } \
++} while (0)
++
++static int testMouseButtonBarrier(void) {
++    int result = 0;
++
++    CHECK(setupWorkerState(TEST_MOUSE_BUTTON_BARRIER, 3) == 0);
++
++    CHECK(LiSendMouseMoveEventCtx(ctx, 4, 1) == LBQ_SUCCESS);
++    inputSendThreadProc(ctx);
++
++    CHECK(enqueueResult == LBQ_SUCCESS);
++    CHECK(sentInputCount == 3);
++
++    CHECK(sentInputs[0].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++    CHECK(sentInputs[0].deltaX == 4);
++    CHECK(sentInputs[0].deltaY == 1);
++
++    CHECK(sentInputs[1].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++    CHECK(sentInputs[1].deltaX == 6);
++    CHECK(sentInputs[1].deltaY == -2);
++    CHECK(!sentInputs[1].moreData);
++
++    CHECK(sentInputs[2].magic == LE32(MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5));
++    CHECK(sentInputs[2].button == BUTTON_LEFT);
++    CHECK(!sentInputs[2].moreData);
++
++    CHECK(sleepCount == 0);
++    CHECK(flushCount == 0);
++
++Exit:
++    initialized = false;
++    cleanupWorkerState();
++    return result;
++}
++
++static int testKeyboardBarrier(void) {
++    int result = 0;
++
++    CHECK(setupWorkerState(TEST_KEYBOARD_BARRIER, 3) == 0);
++
++    CHECK(LiSendMouseMoveEventCtx(ctx, 4, 1) == LBQ_SUCCESS);
++    inputSendThreadProc(ctx);
++
++    CHECK(enqueueResult == LBQ_SUCCESS);
++    CHECK(sentInputCount == 3);
++
++    CHECK(sentInputs[0].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++    CHECK(sentInputs[0].deltaX == 4);
++    CHECK(sentInputs[0].deltaY == 1);
++
++    CHECK(sentInputs[1].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++    CHECK(sentInputs[1].deltaX == 6);
++    CHECK(sentInputs[1].deltaY == -2);
++    CHECK(!sentInputs[1].moreData);
++
++    CHECK(sentInputs[2].magic == LE32(KEY_UP_EVENT_MAGIC));
++    CHECK(sentInputs[2].keyCode == 0x41);
++    CHECK(!sentInputs[2].moreData);
++
++    CHECK(sleepCount == 0);
++    CHECK(flushCount == 0);
++
++Exit:
++    initialized = false;
++    cleanupWorkerState();
++    return result;
++}
++
++static int testWheelBarrier(void) {
++    int result = 0;
++
++    CHECK(setupWorkerState(TEST_WHEEL_BARRIER, 3) == 0);
++
++    CHECK(LiSendMouseMoveEventCtx(ctx, 4, 1) == LBQ_SUCCESS);
++    inputSendThreadProc(ctx);
++
++    CHECK(enqueueResult == LBQ_SUCCESS);
++    CHECK(sentInputCount == 3);
++
++    CHECK(sentInputs[0].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++    CHECK(sentInputs[0].deltaX == 4);
++    CHECK(sentInputs[0].deltaY == 1);
++
++    CHECK(sentInputs[1].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++    CHECK(sentInputs[1].deltaX == 6);
++    CHECK(sentInputs[1].deltaY == -2);
++    CHECK(!sentInputs[1].moreData);
++
++    CHECK(sentInputs[2].magic == LE32(SCROLL_MAGIC_GEN5));
++    CHECK(sentInputs[2].scrollAmount == -LI_WHEEL_DELTA);
++    CHECK(!sentInputs[2].moreData);
++
++    CHECK(sleepCount == 0);
++    CHECK(flushCount == 0);
++
++Exit:
++    initialized = false;
++    cleanupWorkerState();
++    return result;
++}
++
++static int testHorizontalReversal(void) {
++    int result = 0;
++
++    CHECK(setupWorkerState(TEST_HORIZONTAL_REVERSAL, 4) == 0);
++
++    CHECK(LiSendMouseMoveEventCtx(ctx, 4, 1) == LBQ_SUCCESS);
++    inputSendThreadProc(ctx);
++
++    CHECK(enqueueResult == LBQ_SUCCESS);
++    CHECK(sentInputCount == 4);
++
++    CHECK(sentInputs[0].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++    CHECK(sentInputs[0].deltaX == 4);
++    CHECK(sentInputs[0].deltaY == 1);
++
++    CHECK(sentInputs[1].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++    CHECK(sentInputs[1].deltaX == 6);
++    CHECK(sentInputs[1].deltaY == -2);
++    CHECK(!sentInputs[1].moreData);
++    CHECK(sentInputs[1].sleepCountBeforeSend == 0);
++
++    CHECK(sentInputs[2].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++    CHECK(sentInputs[2].deltaX == -2);
++    CHECK(sentInputs[2].deltaY == 3);
++    CHECK(!sentInputs[2].moreData);
++    CHECK(sentInputs[2].sleepCountBeforeSend == 0);
++
++    CHECK(sentInputs[3].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++    CHECK(sentInputs[3].deltaX == -3);
++    CHECK(sentInputs[3].deltaY == 4);
++    CHECK(!sentInputs[3].moreData);
++    CHECK(sentInputs[3].sleepCountBeforeSend == 1);
++
++    CHECK(sleepCount == 1);
++    CHECK(flushCount == 1);
++
++Exit:
++    initialized = false;
++    cleanupWorkerState();
++    return result;
++}
++
++static int testArithmeticOverflow(void) {
++    int result = 0;
++
++    CHECK(setupWorkerState(TEST_ARITHMETIC_OVERFLOW, 4) == 0);
++
++    CHECK(LiSendMouseMoveEventCtx(ctx, 4, 1) == LBQ_SUCCESS);
++    inputSendThreadProc(ctx);
++
++    CHECK(enqueueResult == LBQ_SUCCESS);
++    CHECK(sentInputCount == 4);
++
++    CHECK(sentInputs[0].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++    CHECK(sentInputs[0].deltaX == 4);
++    CHECK(sentInputs[0].deltaY == 1);
++
++    CHECK(sentInputs[1].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++    CHECK(sentInputs[1].deltaX == 6);
++    CHECK(sentInputs[1].deltaY == -2);
++    CHECK(!sentInputs[1].moreData);
++    CHECK(sentInputs[1].sleepCountBeforeSend == 0);
++
++    CHECK(sentInputs[2].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++    CHECK(sentInputs[2].deltaX == INT16_MAX);
++    CHECK(sentInputs[2].deltaY == 3);
++    CHECK(!sentInputs[2].moreData);
++    CHECK(sentInputs[2].sleepCountBeforeSend == 0);
++
++    CHECK(sentInputs[3].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++    CHECK(sentInputs[3].deltaX == 1);
++    CHECK(sentInputs[3].deltaY == 4);
++    CHECK(!sentInputs[3].moreData);
++    CHECK(sentInputs[3].sleepCountBeforeSend == 1);
++
++    CHECK(sleepCount == 1);
++    CHECK(flushCount == 1);
++
++Exit:
++    initialized = false;
++    cleanupWorkerState();
++    return result;
++}
++
++static int testContinuousSameDirection(void) {
++    int result = 0;
++
++    CHECK(setupWorkerState(TEST_CONTINUOUS_SAME_DIRECTION, 2) == 0);
++
++    CHECK(LiSendMouseMoveEventCtx(ctx, 4, 1) == LBQ_SUCCESS);
++    inputSendThreadProc(ctx);
++
++    CHECK(enqueueResult == LBQ_SUCCESS);
++    CHECK(sentInputCount == 2);
++
++    CHECK(sentInputs[0].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++    CHECK(sentInputs[0].deltaX == 4);
++    CHECK(sentInputs[0].deltaY == 1);
++
++    CHECK(sentInputs[1].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++    CHECK(sentInputs[1].deltaX == 11);
++    CHECK(sentInputs[1].deltaY == 1);
++    CHECK(!sentInputs[1].moreData);
++    CHECK(sentInputs[1].sleepCountBeforeSend == 1);
++
++    CHECK(sleepCount == 1);
++    CHECK(flushCount == 1);
++
++Exit:
++    initialized = false;
++    cleanupWorkerState();
++    return result;
++}
++
++static int testQueueCompression(void) {
++    int result = 0;
++    int i;
++
++    CHECK(setupWorkerState(TEST_QUEUE_COMPRESSION, 1) == 0);
++
++    for (i = 0; i < MAX_QUEUED_INPUT_PACKETS + 1; i++) {
++        enqueueResult = LiSendMouseMoveEventCtx(ctx, 1, 1);
++        if (enqueueResult != LBQ_SUCCESS) {
++            break;
++        }
++    }
++
++    if (i != MAX_QUEUED_INPUT_PACKETS + 1) {
++        fprintf(stderr, "FAIL: motion enqueue %d returned %d\n",
++                i + 1, enqueueResult);
++        result = __LINE__;
++        goto Exit;
++    }
++
++    inputSendThreadProc(ctx);
++
++    CHECK(sentInputCount == 1);
++    CHECK(sentInputs[0].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++    CHECK(sentInputs[0].deltaX == MAX_QUEUED_INPUT_PACKETS + 1);
++    CHECK(sentInputs[0].deltaY == MAX_QUEUED_INPUT_PACKETS + 1);
++    CHECK(!sentInputs[0].moreData);
++    CHECK(sentInputs[0].sleepCountBeforeSend == 0);
++    CHECK(sleepCount == 0);
++    CHECK(flushCount == 0);
++
++Exit:
++    initialized = false;
++    cleanupWorkerState();
++    return result;
++}
++
++static int testSaturatedButtonRelease(void) {
++    int result = 0;
++    int i;
++
++    CHECK(setupWorkerState(TEST_SATURATED_BUTTON_RELEASE,
++                           MAX_QUEUED_INPUT_PACKETS) == 0);
++
++    for (i = 0; i < MAX_QUEUED_INPUT_PACKETS; i++) {
++        short deltaX = (i % 2 == 0) ? 1 : -1;
++        CHECK(LiSendMouseMoveEventCtx(ctx, deltaX, 0) == LBQ_SUCCESS);
++    }
++
++    enqueueResult = LiSendMouseButtonEventCtx(ctx, BUTTON_ACTION_RELEASE, BUTTON_LEFT);
++    if (enqueueResult != LBQ_SUCCESS) {
++        fprintf(stderr, "FAIL: saturated button release returned %d\n",
++                enqueueResult);
++        result = __LINE__;
++        goto Exit;
++    }
++
++    inputSendThreadProc(ctx);
++
++    CHECK(sentInputCount == MAX_QUEUED_INPUT_PACKETS);
++    for (i = 0; i < MAX_QUEUED_INPUT_PACKETS - 1; i++) {
++        short expectedDeltaX = (i % 2 == 0) ? -1 : 1;
++        CHECK(sentInputs[i].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++        CHECK(sentInputs[i].deltaX == expectedDeltaX);
++        CHECK(sentInputs[i].deltaY == 0);
++        CHECK(!sentInputs[i].moreData);
++    }
++
++    CHECK(sentInputs[MAX_QUEUED_INPUT_PACKETS - 1].magic ==
++          LE32(MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5));
++    CHECK(sentInputs[MAX_QUEUED_INPUT_PACKETS - 1].button == BUTTON_LEFT);
++    CHECK(!sentInputs[MAX_QUEUED_INPUT_PACKETS - 1].moreData);
++    CHECK(sleepCount == 0);
++    CHECK(flushCount == 0);
++
++Exit:
++    initialized = false;
++    cleanupWorkerState();
++    return result;
++}
++
++static int testSaturatedKeyUp(void) {
++    int result = 0;
++    int i;
++
++    CHECK(setupWorkerState(TEST_SATURATED_KEY_UP,
++                           MAX_QUEUED_INPUT_PACKETS) == 0);
++
++    for (i = 0; i < MAX_QUEUED_INPUT_PACKETS; i++) {
++        short deltaX = (i % 2 == 0) ? 1 : -1;
++        CHECK(LiSendMouseMoveEventCtx(ctx, deltaX, 0) == LBQ_SUCCESS);
++    }
++
++    enqueueResult = LiSendKeyboardEventCtx(ctx, 0x41, KEY_ACTION_UP, 0);
++    if (enqueueResult != LBQ_SUCCESS) {
++        fprintf(stderr, "FAIL: saturated key-up returned %d\n",
++                enqueueResult);
++        result = __LINE__;
++        goto Exit;
++    }
++
++    inputSendThreadProc(ctx);
++
++    CHECK(sentInputCount == MAX_QUEUED_INPUT_PACKETS);
++    for (i = 0; i < MAX_QUEUED_INPUT_PACKETS - 1; i++) {
++        short expectedDeltaX = (i % 2 == 0) ? -1 : 1;
++        CHECK(sentInputs[i].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++        CHECK(sentInputs[i].deltaX == expectedDeltaX);
++        CHECK(sentInputs[i].deltaY == 0);
++        CHECK(!sentInputs[i].moreData);
++    }
++
++    CHECK(sentInputs[MAX_QUEUED_INPUT_PACKETS - 1].magic ==
++          LE32(KEY_UP_EVENT_MAGIC));
++    CHECK(sentInputs[MAX_QUEUED_INPUT_PACKETS - 1].keyCode == 0x41);
++    CHECK(!sentInputs[MAX_QUEUED_INPUT_PACKETS - 1].moreData);
++    CHECK(sleepCount == 0);
++    CHECK(flushCount == 0);
++
++Exit:
++    initialized = false;
++    cleanupWorkerState();
++    return result;
++}
++
++static int testSaturatedVerticalWheel(void) {
++    int result = 0;
++    int i;
++
++    CHECK(setupWorkerState(TEST_SATURATED_VERTICAL_WHEEL,
++                           MAX_QUEUED_INPUT_PACKETS) == 0);
++
++    for (i = 0; i < MAX_QUEUED_INPUT_PACKETS; i++) {
++        short deltaX = (i % 2 == 0) ? 1 : -1;
++        CHECK(LiSendMouseMoveEventCtx(ctx, deltaX, 0) == LBQ_SUCCESS);
++    }
++
++    enqueueResult = LiSendScrollEventCtx(ctx, -1);
++    if (enqueueResult != LBQ_SUCCESS) {
++        fprintf(stderr, "FAIL: saturated vertical wheel returned %d\n",
++                enqueueResult);
++        result = __LINE__;
++        goto Exit;
++    }
++
++    inputSendThreadProc(ctx);
++
++    CHECK(sentInputCount == MAX_QUEUED_INPUT_PACKETS);
++    for (i = 0; i < MAX_QUEUED_INPUT_PACKETS - 1; i++) {
++        short expectedDeltaX = (i % 2 == 0) ? -1 : 1;
++        CHECK(sentInputs[i].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++        CHECK(sentInputs[i].deltaX == expectedDeltaX);
++        CHECK(sentInputs[i].deltaY == 0);
++        CHECK(!sentInputs[i].moreData);
++    }
++
++    CHECK(sentInputs[MAX_QUEUED_INPUT_PACKETS - 1].magic ==
++          LE32(SCROLL_MAGIC_GEN5));
++    CHECK(sentInputs[MAX_QUEUED_INPUT_PACKETS - 1].scrollAmount ==
++          -LI_WHEEL_DELTA);
++    CHECK(!sentInputs[MAX_QUEUED_INPUT_PACKETS - 1].moreData);
++    CHECK(sleepCount == 0);
++    CHECK(flushCount == 0);
++
++Exit:
++    initialized = false;
++    cleanupWorkerState();
++    return result;
++}
++
++static int testSaturatedHorizontalWheel(void) {
++    int result = 0;
++    int i;
++
++    CHECK(setupWorkerState(TEST_SATURATED_HORIZONTAL_WHEEL,
++                           MAX_QUEUED_INPUT_PACKETS) == 0);
++
++    for (i = 0; i < MAX_QUEUED_INPUT_PACKETS; i++) {
++        short deltaX = (i % 2 == 0) ? 1 : -1;
++        CHECK(LiSendMouseMoveEventCtx(ctx, deltaX, 0) == LBQ_SUCCESS);
++    }
++
++    enqueueResult = LiSendHScrollEventCtx(ctx, -1);
++    CHECK(enqueueResult == LBQ_SUCCESS);
++
++    inputSendThreadProc(ctx);
++
++    CHECK(sentInputCount == MAX_QUEUED_INPUT_PACKETS);
++    for (i = 0; i < MAX_QUEUED_INPUT_PACKETS - 1; i++) {
++        short expectedDeltaX = (i % 2 == 0) ? -1 : 1;
++        CHECK(sentInputs[i].magic == LE32(MOUSE_MOVE_REL_MAGIC_GEN5));
++        CHECK(sentInputs[i].deltaX == expectedDeltaX);
++        CHECK(sentInputs[i].deltaY == 0);
++        CHECK(!sentInputs[i].moreData);
++    }
++
++    CHECK(sentInputs[MAX_QUEUED_INPUT_PACKETS - 1].magic ==
++          LE32(SS_HSCROLL_MAGIC));
++    CHECK(sentInputs[MAX_QUEUED_INPUT_PACKETS - 1].scrollAmount ==
++          -LI_WHEEL_DELTA);
++    CHECK(!sentInputs[MAX_QUEUED_INPUT_PACKETS - 1].moreData);
++    CHECK(sleepCount == 0);
++    CHECK(flushCount == 0);
++
++Exit:
++    initialized = false;
++    cleanupWorkerState();
++    return result;
++}
++
++static int testSemanticOnlySaturationRejectsWithoutEviction(void) {
++    int result = 0;
++    int i;
++
++    CHECK(setupWorkerState(TEST_SEMANTIC_ONLY_REJECTION,
++                           MAX_QUEUED_INPUT_PACKETS) == 0);
++
++    for (i = 0; i < MAX_QUEUED_INPUT_PACKETS; i++) {
++        char action = (i % 2 == 0) ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE;
++        CHECK(LiSendMouseButtonEventCtx(ctx, action, BUTTON_LEFT) == LBQ_SUCCESS);
++    }
++
++    // With no relative-motion holder available to evict, a new semantic
++    // transition must fail explicitly so the caller can surface overload.
++    CHECK(LiSendKeyboardEventCtx(ctx, 0x41, KEY_ACTION_UP, 0) == LBQ_BOUND_EXCEEDED);
++
++Exit:
++    initialized = false;
++    cleanupWorkerState();
++    return result;
++}
++
++static int testAbsoluteSnapshots(void) {
++    int result = 0;
++    CHECK(setupWorkerState(TEST_PREQUEUED, 3) == 0);
++    CHECK(LiSendMousePositionEventCtx(ctx, 10, 20, 800, 600) == 0);
++    CHECK(LiSendMousePositionEventCtx(ctx, 30, 40, 900, 700) == 0);
++    CHECK(LiSendKeyboardEventCtx(ctx, 0x41, KEY_ACTION_UP, 0) == 0);
++    CHECK(LiSendMousePositionEventCtx(ctx, 50, 60, 1000, 800) == 0);
++    CHECK(LiSendMousePositionEventCtx(ctx, 70, 80, 1100, 900) == 0);
++    inputSendThreadProc(ctx);
++    CHECK(sentInputCount == 3);
++    CHECK(sentInputs[0].magic == LE32(MOUSE_MOVE_ABS_MAGIC));
++    CHECK(sentInputs[0].deltaX == 30 && sentInputs[0].deltaY == 40);
++    CHECK(sentInputs[0].width == 899 && sentInputs[0].height == 699);
++    CHECK(sentInputs[1].magic == LE32(KEY_UP_EVENT_MAGIC));
++    CHECK(!sentInputs[1].moreData);
++    CHECK(sentInputs[2].magic == LE32(MOUSE_MOVE_ABS_MAGIC));
++    CHECK(sentInputs[2].deltaX == 70 && sentInputs[2].deltaY == 80);
++    CHECK(sentInputs[2].width == 1099 && sentInputs[2].height == 899);
++Exit:
++    initialized = false;
++    cleanupWorkerState();
++    return result;
++}
++
++static int testContextIsolation(void) {
++    static ML_CONNECTION_CONTEXT other;
++    PML_INPUT_STREAM_CONTEXT first = ctx;
++    int result = 0;
++    CHECK(setupWorkerState(TEST_PREQUEUED, 2) == 0);
++    CHECK(LiSendMouseMoveEventCtx(ctx, 12, 3) == 0);
++    CHECK(LiSendMousePositionEventCtx(ctx, 22, 33, 800, 600) == 0);
++    ctx = &other.inputContext;
++    CHECK(setupWorkerState(TEST_PREQUEUED, 2) == 0);
++    ctx->connectionContext = &other;
++    AppVersionQuad[0] = 7;
++    AppVersionQuad[1] = 1;
++    AppVersionQuad[2] = 431;
++    AppVersionQuad[3] = -1;
++    CHECK(LiSendMouseMoveEventCtx(ctx, -8, -9) == 0);
++    CHECK(LiSendMousePositionEventCtx(ctx, 77, 88, 1200, 1000) == 0);
++    ctx = first;
++    inputSendThreadProc(ctx);
++    CHECK(sentInputCount == 2);
++    CHECK(sentInputs[0].deltaX == 12 && sentInputs[0].deltaY == 3);
++    CHECK(sentInputs[1].deltaX == 22 && sentInputs[1].deltaY == 33);
++    CHECK(sentInputs[1].width == 799);
++    ctx = &other.inputContext;
++    sentInputCount = 0;
++    inputSendThreadProc(ctx);
++    CHECK(sentInputCount == 2);
++    CHECK(sentInputs[0].deltaX == -8 && sentInputs[0].deltaY == -9);
++    CHECK(sentInputs[1].deltaX == 77 && sentInputs[1].deltaY == 88);
++    CHECK(sentInputs[1].width == 1199);
++Exit:
++    ctx = &other.inputContext;
++    initialized = false;
++    cleanupWorkerState();
++    ctx = first;
++    initialized = false;
++    cleanupWorkerState();
++    return result;
++}
++
++// Bypass producer compression so this checks the worker's own atomic merge.
++static int queueRawRelative(short x, short y) {
++    PPACKET_HOLDER holder = allocatePacketHolder(ctx, 0);
++    if (holder == NULL) return -1;
++    holder->channelId = CTRL_CHANNEL_MOUSE;
++    holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
++    holder->packet.mouseMoveRel.header.size = BE32(sizeof(NV_REL_MOUSE_MOVE_PACKET) - 4);
++    holder->packet.mouseMoveRel.header.magic = LE32(MOUSE_MOVE_REL_MAGIC_GEN5);
++    holder->packet.mouseMoveRel.deltaX = BE16(x);
++    holder->packet.mouseMoveRel.deltaY = BE16(y);
++    return LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
++}
++
++static int testWorkerMergeAndSignedLimits(void) {
++    int result = 0;
++    CHECK(setupWorkerState(TEST_PREQUEUED, 4) == 0);
++    CHECK(queueRawRelative(4, 7) == 0);
++    CHECK(queueRawRelative(0, -9) == 0); // vertical reversal is not a boundary
++    CHECK(LiSendKeyboardEventCtx(ctx, 0x41, KEY_ACTION_UP, 0) == 0);
++    CHECK(queueRawRelative(0, INT16_MIN) == 0);
++    CHECK(queueRawRelative(0, -1) == 0); // vertical signed16 underflow boundary
++    inputSendThreadProc(ctx);
++    CHECK(sentInputCount == 4);
++    CHECK(sentInputs[0].deltaX == 4 && sentInputs[0].deltaY == -2);
++    CHECK(!sentInputs[0].moreData && !sentInputs[1].moreData);
++    CHECK(sentInputs[2].deltaY == INT16_MIN && !sentInputs[2].moreData);
++    CHECK(sentInputs[3].deltaY == -1 && !sentInputs[3].moreData);
++    CHECK(sleepCount == 0);
++Exit:
++    initialized = false;
++    cleanupWorkerState();
++    return result;
++}
++
++static int testPenSamplesPreserved(void) {
++    int result = 0;
++    CHECK(setupWorkerState(TEST_PREQUEUED, 4) == 0);
++    // Contact MOVE samples must not collapse; only adjacent matching HOVERs may.
++    for (int i = 0; i < 5; i++) {
++        PPACKET_HOLDER holder = allocatePacketHolder(ctx, 0);
++        CHECK(holder != NULL);
++        memset(holder, 0, sizeof(*holder));
++        holder->channelId = CTRL_CHANNEL_MOUSE;
++        holder->packet.pen.header.size = BE32(sizeof(SS_PEN_PACKET) - 4);
++        holder->packet.pen.header.magic = LE32(SS_PEN_MAGIC);
++        holder->packet.pen.eventType = i < 2 ? LI_TOUCH_EVENT_MOVE : LI_TOUCH_EVENT_HOVER;
++        holder->packet.pen.penButtons = i == 4 ? 1 : 0;
++        CHECK(LbqOfferQueueItem(&packetQueue, holder, &holder->entry) == 0);
++    }
++    inputSendThreadProc(ctx);
++    CHECK(sentInputCount == 4);
++    for (int i = 0; i < 4; i++) CHECK(sentInputs[i].magic == LE32(SS_PEN_MAGIC));
++Exit:
++    initialized = false;
++    cleanupWorkerState();
++    return result;
++}
++
++int main(void) {
++    int result;
++
++    ctx->connectionContext = &testConnection;
++    AppVersionQuad[0] = 7;
++    AppVersionQuad[1] = 1;
++    AppVersionQuad[2] = 431;
++    AppVersionQuad[3] = -1;
++
++    result = testWorkerMergeAndSignedLimits();
++    if (result != 0) return result;
++    result = testPenSamplesPreserved();
++    if (result != 0) return result;
++    result = testAbsoluteSnapshots();
++    if (result != 0) return result;
++    result = testContextIsolation();
++    if (result != 0) return result;
++
++    result = testQueueCompression();
++    if (result != 0) {
++        return result;
++    }
++
++    result = testMouseButtonBarrier();
++    if (result != 0) {
++        return result;
++    }
++
++    result = testKeyboardBarrier();
++    if (result != 0) {
++        return result;
++    }
++
++    result = testWheelBarrier();
++    if (result != 0) {
++        return result;
++    }
++
++    result = testHorizontalReversal();
++    if (result != 0) {
++        return result;
++    }
++
++    result = testArithmeticOverflow();
++    if (result != 0) {
++        return result;
++    }
++
++    result = testContinuousSameDirection();
++    if (result != 0) {
++        return result;
++    }
++
++    result = testSaturatedButtonRelease();
++    if (result != 0) {
++        return result;
++    }
++
++    result = testSaturatedKeyUp();
++    if (result != 0) {
++        return result;
++    }
++
++    result = testSaturatedVerticalWheel();
++    if (result != 0) {
++        return result;
++    }
++
++    result = testSaturatedHorizontalWheel();
++    if (result != 0) {
++        return result;
++    }
++
++    return testSemanticOnlySaturationRejectsWithoutEviction();
++}
+diff --git a/tests/LinkedBlockingQueueAtomicTest.c b/tests/LinkedBlockingQueueAtomicTest.c
+new file mode 100644
+index 0000000..ac6a6bb
+--- /dev/null
++++ b/tests/LinkedBlockingQueueAtomicTest.c
+@@ -0,0 +1,203 @@
++#include "InputQueueExtensions.h"
++
++#include <errno.h>
++#include <pthread.h>
++
++typedef struct _TEST_ITEM {
++    int value;
++} TEST_ITEM;
++
++typedef enum _PRODUCER_KIND {
++    PRODUCER_TAIL_MERGE,
++    PRODUCER_OLDEST_EVICTION,
++} PRODUCER_KIND;
++
++typedef struct _INTERLEAVING_CONTEXT {
++    LINKED_BLOCKING_QUEUE queue;
++    pthread_mutex_t gateMutex;
++    pthread_cond_t gateCondition;
++    bool predicateEntered;
++    bool producerAttempting;
++    bool releasePredicate;
++    int producerCallbackCount;
++    int consumerResult;
++    int producerResult;
++    void* consumerData;
++    void* evictedData;
++    TEST_ITEM offeredItem;
++    LINKED_BLOCKING_QUEUE_ENTRY offeredEntry;
++    PRODUCER_KIND producerKind;
++} INTERLEAVING_CONTEXT;
++
++#define CHECK(condition) do { if (!(condition)) { fprintf(stderr, "FAIL: %s (line %d)\n", #condition, __LINE__); return EXIT_FAILURE; } } while (0)
++
++static bool classifyAndPause(void* data, void* context) {
++    INTERLEAVING_CONTEXT* test = context;
++    TEST_ITEM* item = data;
++
++    pthread_mutex_lock(&test->gateMutex);
++    test->predicateEntered = true;
++    pthread_cond_broadcast(&test->gateCondition);
++    while (!test->releasePredicate) {
++        pthread_cond_wait(&test->gateCondition, &test->gateMutex);
++    }
++    pthread_mutex_unlock(&test->gateMutex);
++
++    return item->value == 7;
++}
++
++static bool mutateTailIfCalled(void* tailData, void* offeredData, void* context) {
++    INTERLEAVING_CONTEXT* test = context;
++    TEST_ITEM* tail = tailData;
++
++    (void)offeredData;
++    test->producerCallbackCount++;
++    tail->value = 99;
++    return true;
++}
++
++static bool evictAnyItem(void* data, void* context) {
++    INTERLEAVING_CONTEXT* test = context;
++
++    (void)data;
++    test->producerCallbackCount++;
++    return true;
++}
++
++static void* consumerThread(void* context) {
++    INTERLEAVING_CONTEXT* test = context;
++
++    test->consumerResult = LbqPollQueueElementIf(&test->queue,
++                                                 classifyAndPause,
++                                                 test,
++                                                 &test->consumerData);
++    return NULL;
++}
++
++static void* producerThread(void* context) {
++    INTERLEAVING_CONTEXT* test = context;
++
++    pthread_mutex_lock(&test->gateMutex);
++    while (!test->predicateEntered) {
++        pthread_cond_wait(&test->gateCondition, &test->gateMutex);
++    }
++    test->producerAttempting = true;
++    pthread_cond_broadcast(&test->gateCondition);
++    pthread_mutex_unlock(&test->gateMutex);
++
++    if (test->producerKind == PRODUCER_TAIL_MERGE) {
++        test->producerResult = LbqOfferQueueItemWithTailMerge(&test->queue,
++                                                             &test->offeredItem,
++                                                             &test->offeredEntry,
++                                                             mutateTailIfCalled,
++                                                             test);
++    }
++    else {
++        test->producerResult = LbqOfferQueueItemWithOldestEviction(&test->queue,
++                                                                  &test->offeredItem,
++                                                                  &test->offeredEntry,
++                                                                  evictAnyItem,
++                                                                  test,
++                                                                  &test->evictedData);
++    }
++
++    return NULL;
++}
++
++static int runInterleaving(PRODUCER_KIND producerKind) {
++    INTERLEAVING_CONTEXT test = {0};
++    LINKED_BLOCKING_QUEUE_ENTRY candidateEntry;
++    TEST_ITEM candidateItem = {7};
++    pthread_t consumer;
++    pthread_t producer;
++    void* remainingData = NULL;
++
++    test.producerKind = producerKind;
++    test.offeredItem.value = 11;
++
++    CHECK(pthread_mutex_init(&test.gateMutex, NULL) == 0);
++    CHECK(pthread_cond_init(&test.gateCondition, NULL) == 0);
++    CHECK(LbqInitializeLinkedBlockingQueue(&test.queue, 1) == 0);
++    CHECK(LbqOfferQueueItem(&test.queue, &candidateItem, &candidateEntry) == LBQ_SUCCESS);
++
++    CHECK(pthread_create(&consumer, NULL, consumerThread, &test) == 0);
++    CHECK(pthread_create(&producer, NULL, producerThread, &test) == 0);
++
++    pthread_mutex_lock(&test.gateMutex);
++    while (!test.producerAttempting) {
++        pthread_cond_wait(&test.gateCondition, &test.gateMutex);
++    }
++
++    // The classifier is paused while holding the queue mutex, so the producer
++    // cannot enter its merge or eviction callback until removal is complete.
++    CHECK(pthread_mutex_trylock(&test.queue.mutex) == EBUSY);
++    CHECK(test.producerCallbackCount == 0);
++    test.releasePredicate = true;
++    pthread_cond_broadcast(&test.gateCondition);
++    pthread_mutex_unlock(&test.gateMutex);
++
++    CHECK(pthread_join(consumer, NULL) == 0);
++    CHECK(pthread_join(producer, NULL) == 0);
++
++    CHECK(test.consumerResult == LBQ_SUCCESS);
++    CHECK(test.consumerData == &candidateItem);
++    CHECK(candidateItem.value == 7);
++    CHECK(test.producerResult == LBQ_SUCCESS);
++    CHECK(test.producerCallbackCount == 0);
++    CHECK(test.evictedData == NULL);
++
++    CHECK(LbqPollQueueElement(&test.queue, &remainingData) == LBQ_SUCCESS);
++    CHECK(remainingData == &test.offeredItem);
++
++    LbqSignalQueueShutdown(&test.queue);
++    CHECK(LbqDestroyLinkedBlockingQueue(&test.queue) == NULL);
++    CHECK(pthread_cond_destroy(&test.gateCondition) == 0);
++    CHECK(pthread_mutex_destroy(&test.gateMutex) == 0);
++    return 0;
++}
++
++static bool valueIsSeven(void* data, void* context) {
++    (void)context;
++    return ((TEST_ITEM*)data)->value == 7;
++}
++
++static int testQueueEdges(void) {
++    LINKED_BLOCKING_QUEUE queue;
++    LINKED_BLOCKING_QUEUE_ENTRY entries[4];
++    TEST_ITEM items[4] = {{1}, {7}, {7}, {2}};
++    void* data = NULL;
++    void* evicted = NULL;
++    CHECK(LbqInitializeLinkedBlockingQueue(&queue, 3) == 0);
++    for (int i = 0; i < 3; i++)
++        CHECK(LbqOfferQueueItem(&queue, &items[i], &entries[i]) == LBQ_SUCCESS);
++    CHECK(LbqOfferQueueItemWithOldestEviction(&queue, &items[3], &entries[3],
++          valueIsSeven, NULL, &evicted) == LBQ_SUCCESS);
++    CHECK(evicted == &items[1]);
++    CHECK(LbqGetItemCount(&queue) == 3);
++    CHECK(LbqPollQueueElementIf(&queue, valueIsSeven, NULL, &data) == LBQ_NO_ELEMENT);
++    CHECK(LbqPollQueueElement(&queue, &data) == LBQ_SUCCESS && data == &items[0]);
++    CHECK(LbqPollQueueElementIf(&queue, valueIsSeven, NULL, &data) == LBQ_SUCCESS);
++    CHECK(data == &items[2]);
++    CHECK(LbqPollQueueElement(&queue, &data) == LBQ_SUCCESS && data == &items[3]);
++    LbqSignalQueueDrain(&queue);
++    CHECK(LbqOfferQueueItemWithTailMerge(&queue, &items[0], &entries[0],
++          NULL, NULL) == LBQ_INTERRUPTED);
++    CHECK(LbqOfferQueueItemWithOldestEviction(&queue, &items[0], &entries[0],
++          valueIsSeven, NULL, &evicted) == LBQ_INTERRUPTED && evicted == NULL);
++    CHECK(LbqPollQueueElementIf(&queue, valueIsSeven, NULL, &data) == LBQ_INTERRUPTED);
++    CHECK(LbqDestroyLinkedBlockingQueue(&queue) == NULL);
++    return 0;
++}
++
++int main(void) {
++    int result;
++
++    result = testQueueEdges();
++    if (result != 0) return result;
++    result = runInterleaving(PRODUCER_TAIL_MERGE);
++    if (result != 0) {
++        return result;
++    }
++
++    return runInterleaving(PRODUCER_OLDEST_EVICTION);
++}

@@ -2632,3 +2632,4 @@
 "Input Monitoring Alert Message" = "未开启时，鼠标使用兼容路径。请在“系统设置”>“隐私与安全性”>“输入监控”中打开 Moonlight；已经打开的话，先关闭再打开。";
 "Open System Settings" = "打开系统设置";
 "Mouse Input Compatibility" = "兼容（AppKit）";
+"Emulated Touch Scroll Speed" = "模拟触控滚动速度";

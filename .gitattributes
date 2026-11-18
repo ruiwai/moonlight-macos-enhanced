@@ -1,0 +1,2 @@
+# Blank context lines in a unified diff are a single space by design.
+moonlight-common/cs-kz-input.patch whitespace=-blank-at-eol

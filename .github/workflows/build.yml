@@ -54,6 +54,13 @@ jobs:
     - name: Select Xcode 27.0
       run: sudo xcode-select -s /Applications/Xcode_27.0.app/Contents/Developer
 
+    - name: Test CS/KZ input coherence
+      if: matrix.variant == 'arm64'
+      run: |
+        if ! brew list --versions openssl@3 >/dev/null; then brew install openssl@3; fi
+        bash tests/input-coherence/run.sh -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
+          -DCMAKE_C_FLAGS="-I$(brew --prefix openssl@3)/include"
+
     - name: Test H.264 passthrough recording
       if: matrix.variant == 'arm64'
       run: |

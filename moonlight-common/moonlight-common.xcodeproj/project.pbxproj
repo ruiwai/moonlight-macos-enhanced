@@ -102,10 +102,10 @@
 		98AB2E1E1CAD423B0089BB98 /* ControlStream.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ControlStream.c; sourceTree = "<group>"; };
 		98AB2E1F1CAD423B0089BB98 /* FakeCallbacks.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = FakeCallbacks.c; sourceTree = "<group>"; };
 		98AB2E201CAD423B0089BB98 /* Input.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Input.h; sourceTree = "<group>"; };
-		98AB2E211CAD423B0089BB98 /* InputStream.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = InputStream.c; sourceTree = "<group>"; };
+		98AB2E211CAD423B0089BB98 /* InputStream.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "cs-kz/InputStream.c"; sourceTree = DERIVED_FILE_DIR; };
 		98AB2E221CAD423B0089BB98 /* Limelight-internal.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Limelight-internal.h"; sourceTree = "<group>"; };
 		98AB2E231CAD423B0089BB98 /* Limelight.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Limelight.h; sourceTree = "<group>"; };
-		98AB2E241CAD423B0089BB98 /* LinkedBlockingQueue.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = LinkedBlockingQueue.c; sourceTree = "<group>"; };
+		98AB2E241CAD423B0089BB98 /* LinkedBlockingQueue.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "cs-kz/LinkedBlockingQueue.c"; sourceTree = DERIVED_FILE_DIR; };
 		98AB2E251CAD423B0089BB98 /* LinkedBlockingQueue.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LinkedBlockingQueue.h; sourceTree = "<group>"; };
 		98AB2E261CAD423B0089BB98 /* Misc.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = Misc.c; sourceTree = "<group>"; };
 		98AB2E311CAD423B0089BB98 /* Platform.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = Platform.c; sourceTree = "<group>"; };
@@ -312,6 +312,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = FB290E3219B37A4E004C83CF /* Build configuration list for PBXNativeTarget "moonlight-common" */;
 			buildPhases = (
+				4B5AF765E8314C75AA1072A7 /* Prepare CS-KZ input sources */,
 				FB290E2A19B37A4E004C83CF /* Sources */,
 				FB290E2B19B37A4E004C83CF /* Frameworks */,
 			);
@@ -351,6 +352,30 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		4B5AF765E8314C75AA1072A7 /* Prepare CS-KZ input sources */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = (
+				"$(SRCROOT)/prepare-input-sources.sh",
+				"$(SRCROOT)/cs-kz-input.patch",
+				"$(SRCROOT)/moonlight-common-c/src/InputStream.c",
+				"$(SRCROOT)/moonlight-common-c/src/LinkedBlockingQueue.c",
+			);
+			name = "Prepare CS-KZ input sources";
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/cs-kz/InputStream.c",
+				"$(DERIVED_FILE_DIR)/cs-kz/LinkedBlockingQueue.c",
+				"$(DERIVED_FILE_DIR)/cs-kz/InputStreamPolicy.h",
+				"$(DERIVED_FILE_DIR)/cs-kz/InputQueueExtensions.h",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "sh \"$SRCROOT/prepare-input-sources.sh\" \"$DERIVED_FILE_DIR/cs-kz\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		FB290E2A19B37A4E004C83CF /* Sources */ = {
@@ -535,6 +560,7 @@
 					"$(BUILT_PRODUCTS_DIR)",
 				);
 				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/moonlight-common-c/src",
 					"moonlight-common-c/enet/include",
 					"$(SRCROOT)/../xcframeworks/openssl/include",
 					"../libs/**",
@@ -559,6 +585,7 @@
 					"$(BUILT_PRODUCTS_DIR)",
 				);
 				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/moonlight-common-c/src",
 					"moonlight-common-c/enet/include",
 					"$(SRCROOT)/../xcframeworks/openssl/include",
 					"../libs/**",

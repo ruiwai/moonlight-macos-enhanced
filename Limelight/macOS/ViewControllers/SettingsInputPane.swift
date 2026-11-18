@@ -289,16 +289,6 @@ private struct KeyboardMouseSettingsSection: View {
           .controllerSlider(value: $settingsModel.pointerSensitivity, in: 0.25...3.0)
           .frame(width: 190)
       }
-      SettingsRow(title: "Scroll Mode") {
-        Picker("", selection: $settingsModel.selectedPhysicalWheelMode) {
-          ForEach(SettingsModel.physicalWheelModes, id: \.self) { value in
-            Text(languageManager.localize(value)).tag(value)
-          }
-        }
-        .labelsHidden()
-        .controllerPicker(selection: $settingsModel.selectedPhysicalWheelMode, options: SettingsModel.physicalWheelModes, title: { value in languageManager.localize(value) })
-        .frame(width: 180, alignment: .trailing)
-      }
       SettingsRow(title: "Input Monitoring", detail: "Input Monitoring purpose") {
         HStack(spacing: 8) {
           Circle()
@@ -636,43 +626,15 @@ private struct USBDeviceRow: View {
 
 private struct MouseTuningSettingsSection: View {
   @EnvironmentObject private var settingsModel: SettingsModel
-  private var coreHID: Bool {
-    let strategy = MouseInputDriverStrategy(selection: settingsModel.selectedMouseDriver)
-    return strategy == .automatic || strategy == .coreHID
-  }
   var body: some View {
     FormSection(title: "Mouse Tuning") {
       if settingsModel.mouseMode == "remote" {
         SettingsChoiceRow(title: "Free Mouse Movement", selection: $settingsModel.selectedFreeMouseMotionMode,
           options: SettingsModel.freeMouseMotionModes)
       }
-      SettingsValueSliderRow(title: "Physical Wheel Speed", value: $settingsModel.wheelScrollSpeed,
+      // Emulated scroll (touchscreen and controller touchpad), not AppKit wheel events.
+      SettingsValueSliderRow(title: "Emulated Touch Scroll Speed", value: $settingsModel.gestureScrollSpeed,
         range: 0.1...4, step: 0.05, multiplier: 100, suffix: "%")
-      if settingsModel.selectedPhysicalWheelMode != PhysicalWheelScrollMode.notched.displayKey {
-        SettingsValueSliderRow(title: "High Precision Wheel Speed", value: $settingsModel.physicalWheelHighPrecisionScale,
-          range: 1...12, step: 0.25, suffix: "×")
-      }
-      SettingsChoiceRow(title: "Smooth Wheel Mode", selection: $settingsModel.selectedRewrittenScrollMode, options: SettingsModel.rewrittenScrollModes)
-      SettingsValueSliderRow(title: "Smooth Wheel Speed", value: $settingsModel.rewrittenScrollSpeed,
-        range: 0.1...4, step: 0.05, multiplier: 100, suffix: "%")
-      if settingsModel.selectedRewrittenScrollMode != RewrittenScrollMode.notched.displayKey || settingsModel.smartWheelTailFilter > 0 {
-        SettingsValueSliderRow(title: "Smooth Wheel Tail Filter", value: $settingsModel.smartWheelTailFilter, range: 0...1, step: 0.02)
-      }
-      SettingsValueSliderRow(title: "Trackpad Speed", value: $settingsModel.gestureScrollSpeed,
-        range: 0.1...4, step: 0.05, multiplier: 100, suffix: "%")
-      SettingsRow(title: "CoreHID Max Mouse Report Rate") {
-        Picker("", selection: $settingsModel.coreHIDMaxMouseReportRate) {
-          ForEach(SettingsModel.coreHIDMaxMouseReportRates, id: \.self) { value in
-            Text(SettingsModel.coreHIDMaxMouseReportRateLabel(value)).tag(value)
-          }
-        }
-        .labelsHidden()
-        .controllerPicker(
-          selection: $settingsModel.coreHIDMaxMouseReportRate, options: SettingsModel.coreHIDMaxMouseReportRates,
-          title: { SettingsModel.coreHIDMaxMouseReportRateLabel($0) })
-        .frame(width: 190, alignment: .trailing)
-        .disabled(!coreHID)
-      }
       SettingsChoiceRow(title: "Touchscreen Mode", selection: $settingsModel.selectedTouchscreenMode, options: SettingsModel.touchscreenModes)
       SettingsChoiceRow(title: "Touch Input Method", selection: $settingsModel.selectedTouchInputMode, options: SettingsModel.touchInputModes)
       SettingsRow(title: "Open Control Center") {
