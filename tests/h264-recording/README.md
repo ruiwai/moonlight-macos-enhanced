@@ -1,7 +1,7 @@
 # H.264 recorder smoke test
 
 Run `tests/h264-recording/run.sh` on macOS with the Xcode Command Line Tools
-and `ffmpeg` with `libx264` on `PATH`. It builds the real
+and both `ffmpeg` (with `libx264`) and `ffprobe` on `PATH`. It builds the real
 `Limelight/Stream/MLH264Recorder.m` directly, without building the app, and
 provides a local `Log` implementation. All files live in a temporary directory
 that the script removes on exit; it does not use `~/Movies`.
@@ -28,4 +28,9 @@ resolution, packet bytes, sync flags, relative PTS/DTS, and durations. Since
 verified movies for up to 10 seconds and observes the no-IDR directory for at
 least two seconds.
 
-On other operating systems the runner reports a skip (exit 77).
+To check the inputs without building the macOS harness, run
+`tests/h264-recording/run.sh --fixtures-only`. This runs the same `ffprobe`
+check used before the full test: each fixture must have one H.264 stream at
+the expected resolution and contain eight packets. A passing probe followed by
+a reader error distinguishes an AVFoundation read failure from missing input
+packets. This mode also runs on Linux; the full test skips there (exit 77).
