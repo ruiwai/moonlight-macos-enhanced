@@ -631,7 +631,7 @@ static MLEdgeMenuDock MLEdgeMenuDockFromExitEdge(MLFreeMouseExitEdge edge) {
     if (![self isWindowFullscreen] && ![self isWindowBorderlessMode]) {
         return NO;
     }
-    if ([self isWindowFullscreen] && self.hideFullscreenControlBall) {
+    if (self.hideFullscreenControlBall) {
         return NO;
     }
     return YES;
