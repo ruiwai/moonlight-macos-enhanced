@@ -67,6 +67,61 @@ static BOOL IsSync(CMSampleBufferRef sample)
     return CFDictionaryGetValue(first, kCMSampleAttachmentKey_NotSync) != kCFBooleanTrue;
 }
 
+// Count compressed samples, not AVAssetReader reads: one read can deliver a
+// batch, or a zero-sample timeline marker. Never decode or join packet bytes.
+static NSArray *ReadPackets(NSURL *file, NSUInteger expected, NSString **problem)
+{
+    AVAssetReaderTrackOutput *output = nil;
+    AVAssetReader *reader = OpenVideo(file, &output, problem);
+    if (!reader) {
+        return nil;
+    }
+    NSMutableArray *packets = [NSMutableArray arrayWithCapacity:expected];
+    CMSampleBufferRef batch;
+    while ((batch = [output copyNextSampleBuffer]) != NULL) {
+        CMItemCount count = CMSampleBufferGetNumSamples(batch);
+        if ((NSUInteger)count > expected - packets.count) {
+            *problem = [NSString stringWithFormat:@"%@: unexpected extra packet(s) after %lu packets (batch size %ld)",
+                        file.lastPathComponent, (unsigned long)packets.count, (long)count];
+            CFRelease(batch);
+            return nil;
+        }
+        if (count > 0 && !CMSampleBufferDataIsReady(batch)) {
+            OSStatus status = CMSampleBufferMakeDataReady(batch);
+            if (status != noErr) {
+                *problem = [NSString stringWithFormat:@"%@: data unavailable at packet %lu (OSStatus %d)",
+                            file.lastPathComponent, (unsigned long)packets.count, (int)status];
+                CFRelease(batch);
+                return nil;
+            }
+        }
+        if (count == 1) {
+            [packets addObject:CFBridgingRelease(batch)];
+            continue;
+        }
+        for (CMItemCount i = 0; i < count; ++i) {
+            CMSampleBufferRef packet = NULL;
+            OSStatus status = CMSampleBufferCopySampleBufferForRange(kCFAllocatorDefault, batch,
+                                                                     CFRangeMake(i, 1), &packet);
+            if (status != noErr || packet == NULL) {
+                *problem = [NSString stringWithFormat:@"%@: could not extract packet %lu from batch of %ld (OSStatus %d)",
+                            file.lastPathComponent, (unsigned long)packets.count, (long)count, (int)status];
+                CFRelease(batch);
+                return nil;
+            }
+            [packets addObject:CFBridgingRelease(packet)];
+        }
+        CFRelease(batch);
+    }
+    if (reader.status != AVAssetReaderStatusCompleted || packets.count != expected) {
+        *problem = [NSString stringWithFormat:@"%@: read %lu of %lu packets (reader status %ld, error %@)",
+                    file.lastPathComponent, (unsigned long)packets.count, (unsigned long)expected,
+                    (long)reader.status, reader.error];
+        return nil;
+    }
+    return packets;
+}
+
 static NSData *H264Payload(CMSampleBufferRef sample)
 {
     CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sample);
@@ -112,19 +167,14 @@ static NSString *CheckRecording(NSURL *file, NSArray<NSData *> *payloads,
                                 const ExpectedGOP *expected)
 {
     NSString *problem = nil;
-    AVAssetReaderTrackOutput *output = nil;
-    AVAssetReader *reader = OpenVideo(file, &output, &problem);
-    if (reader == nil) {
+    NSArray *packets __attribute__((objc_precise_lifetime)) = ReadPackets(file, GOPSize, &problem);
+    if (packets == nil) {
         return problem;
     }
 
     CMTime startPTS = kCMTimeInvalid;
     for (int i = 0; i < GOPSize; ++i) {
-        CMSampleBufferRef sample = [output copyNextSampleBuffer];
-        if (sample == NULL) {
-            return [NSString stringWithFormat:@"missing packet %d (reader status %ld, error %@)",
-                    i, (long)reader.status, reader.error];
-        }
+        CMSampleBufferRef sample = (__bridge CMSampleBufferRef)packets[i];
         BOOL samePayload = [H264Payload(sample) isEqualToData:payloads[i]];
         BOOL sameSync = IsSync(sample) == (i == 0);
         CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sample);
@@ -141,22 +191,11 @@ static NSString *CheckRecording(NSURL *file, NSArray<NSData *> *payloads,
                                    CMTimeSubtract(expected->timing[i].pts, expected->timing[0].pts)) &&
                           SameTime(CMTimeSubtract(DecodeTime(sample), pts), expected->timing[i].decodeOffset) &&
                           SameTime(CMSampleBufferGetDuration(sample), expected->timing[i].duration);
-        CFRelease(sample);
         if (!samePayload || !sameSync || !sameTiming || !sameDimensions) {
-            [reader cancelReading];
             return [NSString stringWithFormat:@"packet %d mismatch (payload=%@, sync=%@, timing=%@, dimensions=%@)",
                     i, samePayload ? @"OK" : @"BAD", sameSync ? @"OK" : @"BAD", sameTiming ? @"OK" : @"BAD",
                     sameDimensions ? @"OK" : @"BAD"];
         }
-    }
-    CMSampleBufferRef extra = [output copyNextSampleBuffer];
-    if (extra != NULL) {
-        CFRelease(extra);
-        [reader cancelReading];
-        return @"unexpected extra video packet";
-    }
-    if (reader.status != AVAssetReaderStatusCompleted) {
-        return [NSString stringWithFormat:@"recorded MOV reader did not complete: %@", reader.error];
     }
     return nil;
 }
@@ -197,17 +236,21 @@ static NSArray<NSData *> *FeedFixture(NSURL *file, MLH264Recorder *midGOP, MLH26
                                       MLH264Recorder *lastGOPOnly, CMTime midGOPTimeOffset, ExpectedGOP *expected)
 {
     NSString *problem = nil;
-    AVAssetReaderTrackOutput *output = nil;
-    AVAssetReader *reader = OpenVideo(file, &output, &problem);
-    Require(reader != nil, problem);
+    NSArray *packets __attribute__((objc_precise_lifetime)) = ReadPackets(file, 2 * GOPSize, &problem);
+    Require(packets != nil, problem);
 
     NSMutableArray<NSData *> *payloads = [NSMutableArray arrayWithCapacity:GOPSize];
     const int ptsTicks[] = {0, 1, 2, 3, 4, 5, 7, 8};
     for (int i = 0; i < 2 * GOPSize; ++i) {
-        CMSampleBufferRef sample = [output copyNextSampleBuffer];
-        NSData *payload = sample != NULL ? H264Payload(sample) : nil;
-        Require(payload != nil,
-                [NSString stringWithFormat:@"%@: missing encoded H.264 packet %d", file.lastPathComponent, i]);
+        CMSampleBufferRef sample = (__bridge CMSampleBufferRef)packets[i];
+        NSData *payload = H264Payload(sample);
+        if (payload == nil) {
+            CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sample);
+            CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample);
+            Require(NO, [NSString stringWithFormat:@"%@: invalid H.264 packet %d (codec 0x%08x, block bytes %zu, ready %d)",
+                         file.lastPathComponent, i, (unsigned)(format ? CMFormatDescriptionGetMediaSubType(format) : 0),
+                         block ? CMBlockBufferGetDataLength(block) : 0, CMSampleBufferDataIsReady(sample)]);
+        }
         BOOL keyFrame = IsSync(sample);
         CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample);
         Require(keyFrame == (i % GOPSize == 0) && SameTime(pts, CMTimeMake(ptsTicks[i], 25)),
@@ -242,11 +285,7 @@ static NSArray<NSData *> *FeedFixture(NSURL *file, MLH264Recorder *midGOP, MLH26
                 CFRelease(shifted);
             }
         }
-        CFRelease(sample);
     }
-    CMSampleBufferRef extra = [output copyNextSampleBuffer];
-    Require(extra == NULL && reader.status == AVAssetReaderStatusCompleted,
-            [NSString stringWithFormat:@"%@: expected exactly eight readable packets", file.lastPathComponent]);
     return payloads;
 }
 
