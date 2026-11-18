@@ -3,6 +3,8 @@ import SwiftUI
 struct VideoView: View {
   @EnvironmentObject private var settingsModel: SettingsModel
   @ObservedObject private var languageManager = LanguageManager.shared
+  @AppStorage("recordH264Sessions", store: .standard) private var recordH264Sessions = false
+
   private var metalSelected: Bool {
     SettingsModel.normalizedVideoRendererMode(settingsModel.selectedVideoRendererMode) == "Metal Renderer"
   }
@@ -67,6 +69,13 @@ struct VideoView: View {
           }
         }
 
+        SettingsRow(title: "Automatically Record H.264 Sessions", detail: "Automatically Record H.264 Sessions detail") {
+          Toggle("Automatically Record H.264 Sessions", isOn: $recordH264Sessions)
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .focusable()
+            .controlSize(.small)
+        }
 
         SettingsRow(title: "Renderer Mode") {
           Picker("", selection: $settingsModel.selectedVideoRendererMode) {

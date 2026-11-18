@@ -22,6 +22,8 @@
 /* Video Settings */
 "Video" = "Video";
 "Video Codec" = "Video Codec";
+"Automatically Record H.264 Sessions" = "Automatically Record H.264 Sessions";
+"Automatically Record H.264 Sessions detail" = "Records only new H.264 sessions to ~/Movies/Moonlight as MOV files without audio.";
 "Streaming Style" = "Streaming Style";
 "Streaming Style detail" = "Pick the overall feel first: lower latency, balanced, or smoother video.";
 "Timing" = "Timing";

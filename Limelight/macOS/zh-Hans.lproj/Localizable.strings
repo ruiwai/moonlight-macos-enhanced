@@ -20,6 +20,8 @@
 /* Video Settings */
 "Video" = "视频";
 "Video Codec" = "视频编码";
+"Automatically Record H.264 Sessions" = "自动录制 H.264 串流";
+"Automatically Record H.264 Sessions detail" = "仅录制之后启动的 H.264 串流，在 ~/Movies/Moonlight 中保存不含音频的 MOV 文件。";
 "Streaming Style" = "串流风格";
 "Streaming Style detail" = "先选整体风格：更低延迟、均衡或更顺滑画面。";
 "Timing" = "时序";

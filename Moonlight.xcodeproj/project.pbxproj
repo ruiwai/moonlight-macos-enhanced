@@ -190,6 +190,7 @@
 				"Input/HIDSupport+Scroll.m",
 				Input/Ticks.m,
 				Stream/MLAV1SoftwareDecoder.m,
+				Stream/MLH264Recorder.m,
 				Stream/MLAudioBitstreamOutput.m,
 				Stream/MLAdaptiveBitrateController.m,
 				Stream/MLIEC61937.c,

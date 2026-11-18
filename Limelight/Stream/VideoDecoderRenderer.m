@@ -14,6 +14,7 @@
 #import "RendererLayerContainer.h"
 #import "MLFpsMeter.h"
 #import "MLAV1SoftwareDecoder.h"
+#import "MLH264Recorder.h"
 
 #include "Limelight.h"
 #include <math.h>
@@ -1473,6 +1474,7 @@ static BOOL MLGetSharedMetalPipelines(MTLPixelFormat pixelFormat,
     // library calls -stop before it has joined the thread that submits frames, so without this a
     // frame could still be inside VideoToolbox when the session is invalidated.
     NSRecursiveLock *_decodeSubmitLock;
+    MLH264Recorder *_recorder;
     // Set by -stop under the lock; frames that arrive afterwards are dropped.
     BOOL _decoderStopped;
     NSUInteger _lastLoggedDrawableWidth;
@@ -5557,6 +5559,14 @@ void decompressionOutputCallback(void *decompressionOutputRefCon, void *sourceFr
 
 - (void)start
 {
+    if ((videoFormat & VIDEO_FORMAT_MASK_H264) && [NSUserDefaults.standardUserDefaults boolForKey:@"recordH264Sessions"]) {
+        NSURL *movies = [NSFileManager.defaultManager URLsForDirectory:NSMoviesDirectory inDomains:NSUserDomainMask].firstObject;
+        if (movies != nil) {
+            [_decodeSubmitLock lock];
+            _recorder = [[MLH264Recorder alloc] initWithDirectory:[movies URLByAppendingPathComponent:@"Moonlight" isDirectory:YES]];
+            [_decodeSubmitLock unlock];
+        }
+    }
     _rendererStartTimeMs = LiGetMillis();
     _enhancedStartupPacingUntilMs = _rendererStartTimeMs + kMLEnhancedStartupPacingWindowMs;
     _enhancedStartupPresentedFrameCount = 0;
@@ -5822,6 +5832,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     // stopping it waits for that callback. A frame already being decoded finishes first.
     [_decodeSubmitLock lock];
     _decoderStopped = YES;
+    [_recorder finish];
+    _recorder = nil;
     [self clearCurrentFrame];
     [self teardownDecompressionSession];
     [self teardownDolbyVisionMetadataSession];
@@ -6731,11 +6743,13 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         .decodeTimeStamp = kCMTimeInvalid,
     };
 
+    // Playback alone does not require a sample size; the MOV muxer does.
+    size_t sampleSize = _recorder ? CMBlockBufferGetDataLength(frameBlockBuffer) : 0;
     status = CMSampleBufferCreate(kCFAllocatorDefault,
                                   frameBlockBuffer,
                                   true, NULL,
                                   NULL, formatDesc, 1, 1,
-                                  &sampleTiming, 0, NULL,
+                                  &sampleTiming, _recorder ? 1 : 0, _recorder ? &sampleSize : NULL,
                                   &sampleBuffer);
     if (status != noErr) {
         Log(LOG_E, @"CMSampleBufferCreate failed: %d", (int)status);
@@ -6774,6 +6788,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         CFDictionarySetValue(dict, kCMSampleAttachmentKey_NotSync, kCFBooleanFalse);
         CFDictionarySetValue(dict, kCMSampleAttachmentKey_DependsOnOthers, kCFBooleanFalse);
     }
+
+    [_recorder appendSample:sampleBuffer keyFrame:frameType == FRAME_TYPE_IDR];
 
     // Enqueue the next frame
     if ([self usesDecompressionSession]) {
