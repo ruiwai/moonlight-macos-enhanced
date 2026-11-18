@@ -171,7 +171,7 @@ Download the `.dmg` from [Releases](https://github.com/skyhua0224/moonlight-maco
 
 ## Video and HDR
 
-To record without re-encoding, enable **Automatically Record H.264 Sessions** in Video settings and start a new H.264 stream. Each session saves a video-only `.mov` in `~/Movies/Moonlight/`, starting at the first keyframe. This records the host's video, not local overlays or audio. If the writer cannot keep up, recording ends early rather than slowing playback; check the app log for `[recording]`.
+To record without re-encoding, enable **Automatically Record H.264 Sessions** in Video settings and start a new H.264 stream. Look in `~/Movies/Moonlight/` for timestamped `.mov` files. If the host changes the video format (for example, the resolution) or its video clock jumps backward, recording continues in a new numbered part starting at a keyframe. The files contain the host's video, not local overlays or audio. If the disk cannot keep up, recording ends early rather than slowing playback; check the app log for `[recording]`.
 
 ### Renderers
 

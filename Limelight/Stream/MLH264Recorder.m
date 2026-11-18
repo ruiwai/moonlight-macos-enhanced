@@ -13,6 +13,10 @@
     // Accessed only on _queue.
     AVAssetWriter *_writer;
     AVAssetWriterInput *_input;
+    NSString *_sessionName;
+    NSUInteger _partNumber;
+    CMTime _lastDecodeTime;
+    BOOL _failed;
 }
 
 - (instancetype)initWithDirectory:(NSURL *)directory {
@@ -32,7 +36,13 @@
         Log(LOG_W, @"[recording] Cannot create %@: %@", _directory.path, error);
         return NO;
     }
-    NSString *name = [NSUUID.UUID.UUIDString stringByAppendingPathExtension:@"mov"];
+    if (_sessionName == nil) {
+        NSDateFormatter *date = [[NSDateFormatter alloc] init];
+        date.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        date.dateFormat = @"yyyy-MM-dd_HH-mm-ss";
+        _sessionName = [NSString stringWithFormat:@"Moonlight-%@-%@", [date stringFromDate:NSDate.date], NSUUID.UUID.UUIDString];
+    }
+    NSString *name = [NSString stringWithFormat:@"%@-part-%04lu.mov", _sessionName, (unsigned long)++_partNumber];
     NSURL *url = [_directory URLByAppendingPathComponent:name];
     _writer = [[AVAssetWriter alloc] initWithURL:url fileType:AVFileTypeQuickTimeMovie error:&error];
     // nil output settings = mux these compressed samples, do not instantiate an encoder.
@@ -71,12 +81,23 @@
     }
     _writer = nil;
     _input = nil;
+    _lastDecodeTime = kCMTimeInvalid;
 }
 
-- (BOOL)writeSample:(CMSampleBufferRef)sample {
-    if (!CMFormatDescriptionEqual(_input.sourceFormatHint, CMSampleBufferGetFormatDescription(sample))) {
-        Log(LOG_W, @"[recording] Stream format changed; ending this recording early");
-        return NO;
+- (BOOL)writeSample:(CMSampleBufferRef)sample keyFrame:(BOOL)keyFrame {
+    // Use decode order if supplied. The low-latency stream normally has only PTS.
+    CMTime decodeTime = CMSampleBufferGetDecodeTimeStamp(sample);
+    if (!CMTIME_IS_NUMERIC(decodeTime)) decodeTime = CMSampleBufferGetPresentationTimeStamp(sample);
+    BOOL clockReset = CMTIME_IS_NUMERIC(_lastDecodeTime) && CMTIME_IS_NUMERIC(decodeTime) &&
+                      CMTimeCompare(decodeTime, _lastDecodeTime) < 0;
+    if (_input && (clockReset || !CMFormatDescriptionEqual(_input.sourceFormatHint, CMSampleBufferGetFormatDescription(sample)))) {
+        Log(LOG_I, @"[recording] %@; starting a new part at the next keyframe",
+            clockReset ? @"Video timestamp moved backwards" : @"H.264 format changed");
+        [self closeWriter];
+    }
+    if (_input == nil) {
+        if (!keyFrame) return YES; // Never start a part with a dependent frame.
+        if (![self openForSample:sample]) return NO;
     }
     // Allow a brief stall on the writer queue only. Do not wait indefinitely on disconnect.
     for (int retry = 0; retry < 10 && !_input.readyForMoreMediaData && _writer.status == AVAssetWriterStatusWriting; retry++) {
@@ -86,12 +107,12 @@
         Log(LOG_W, @"[recording] Writer stalled or failed; ending this recording early: %@", _writer.error);
         return NO;
     }
+    _lastDecodeTime = decodeTime;
     return YES;
 }
 
 - (void)appendSample:(CMSampleBufferRef)sample keyFrame:(BOOL)keyFrame {
-    BOOL first = !_seenKeyFrame;
-    if (atomic_load(&_closed) || (first && !keyFrame)) return;
+    if (atomic_load(&_closed) || (!_seenKeyFrame && !keyFrame)) return;
 
     // Never hold up playback or drop just one inter-predicted frame. If the disk falls behind,
     // keep the contiguous prefix, then finish the file after the queued samples drain.
@@ -106,11 +127,10 @@
     _seenKeyFrame = YES;
     CFRetain(sample);
     dispatch_async(_queue, ^{
-        if (first && ![self openForSample:sample]) {
-            atomic_store(&self->_closed, YES);
-            [self closeWriter];
-        }
-        if (self->_input != nil && ![self writeSample:sample]) {
+        if (!self->_failed && ![self writeSample:sample keyFrame:keyFrame]) {
+            // A format change is recoverable; an I/O error isn't. Don't let samples
+            // already queued behind a failure open another part.
+            self->_failed = YES;
             atomic_store(&self->_closed, YES);
             [self closeWriter];
         }

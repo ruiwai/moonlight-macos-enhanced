@@ -26,14 +26,18 @@ done
 work=$(mktemp -d "${TMPDIR:-/tmp}/h264-recording.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT
 trap 'exit 1' HUP INT TERM
-mkdir "$work/recorded" "$work/no-idr"
+mkdir "$work/recorded" "$work/no-idr" "$work/rollover"
 
 # Two closed GOPs (IDR, P, P, P), with a deliberate timestamp gap in the second.
-ffmpeg -nostdin -hide_banner -loglevel error \
-    -f lavfi -i 'testsrc2=size=96x64:rate=25' \
-    -frames:v 8 -vf 'setpts=PTS+gte(N\,6)' -fps_mode vfr -an \
-    -c:v libx264 -pix_fmt yuv420p -g 4 -sc_threshold 0 -bf 0 \
-    -x264-params open-gop=0 "$work/input.mov"
+make_fixture() {
+    ffmpeg -nostdin -hide_banner -loglevel error \
+        -f lavfi -i "testsrc2=size=$1:rate=25" \
+        -frames:v 8 -vf 'setpts=PTS+gte(N\,6)' -fps_mode vfr -an \
+        -c:v libx264 -pix_fmt yuv420p -g 4 -sc_threshold 0 -bf 0 \
+        -x264-params open-gop=0 "$2"
+}
+make_fixture 96x64 "$work/input.mov"
+make_fixture 128x96 "$work/changed.mov"
 
 xcrun --sdk macosx clang -fobjc-arc -fmodules -Wall -Wextra \
     -Wno-deprecated-declarations -fmodules-cache-path="$work/modules" \
@@ -42,4 +46,4 @@ xcrun --sdk macosx clang -fobjc-arc -fmodules -Wall -Wextra \
     -framework Foundation -framework AVFoundation -framework CoreMedia \
     -o "$work/smoke"
 
-"$work/smoke" "$work/input.mov" "$work/recorded" "$work/no-idr"
+"$work/smoke" "$work/input.mov" "$work/changed.mov" "$work/recorded" "$work/no-idr" "$work/rollover"

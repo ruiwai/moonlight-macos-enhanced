@@ -103,8 +103,13 @@ typedef struct {
     CMTime duration;
 } PacketTiming;
 
+typedef struct {
+    PacketTiming timing[GOPSize];
+    CMVideoDimensions dimensions;
+} ExpectedGOP;
+
 static NSString *CheckRecording(NSURL *file, NSArray<NSData *> *payloads,
-                                const PacketTiming expected[GOPSize])
+                                const ExpectedGOP *expected)
 {
     NSString *problem = nil;
     AVAssetReaderTrackOutput *output = nil;
@@ -122,20 +127,26 @@ static NSString *CheckRecording(NSURL *file, NSArray<NSData *> *payloads,
         }
         BOOL samePayload = [H264Payload(sample) isEqualToData:payloads[i]];
         BOOL sameSync = IsSync(sample) == (i == 0);
+        CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sample);
+        CMVideoDimensions dimensions = format != NULL ? CMVideoFormatDescriptionGetDimensions(format)
+                                                       : (CMVideoDimensions){0, 0};
+        BOOL sameDimensions = dimensions.width == expected->dimensions.width &&
+                              dimensions.height == expected->dimensions.height;
         CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample);
         if (i == 0) {
             startPTS = pts;
         }
         // MOV can rebase the timeline to its first IDR; compare offsets and durations.
         BOOL sameTiming = SameTime(CMTimeSubtract(pts, startPTS),
-                                   CMTimeSubtract(expected[i].pts, expected[0].pts)) &&
-                          SameTime(CMTimeSubtract(DecodeTime(sample), pts), expected[i].decodeOffset) &&
-                          SameTime(CMSampleBufferGetDuration(sample), expected[i].duration);
+                                   CMTimeSubtract(expected->timing[i].pts, expected->timing[0].pts)) &&
+                          SameTime(CMTimeSubtract(DecodeTime(sample), pts), expected->timing[i].decodeOffset) &&
+                          SameTime(CMSampleBufferGetDuration(sample), expected->timing[i].duration);
         CFRelease(sample);
-        if (!samePayload || !sameSync || !sameTiming) {
+        if (!samePayload || !sameSync || !sameTiming || !sameDimensions) {
             [reader cancelReading];
-            return [NSString stringWithFormat:@"packet %d mismatch (payload=%@, sync=%@, timing=%@)",
-                    i, samePayload ? @"OK" : @"BAD", sameSync ? @"OK" : @"BAD", sameTiming ? @"OK" : @"BAD"];
+            return [NSString stringWithFormat:@"packet %d mismatch (payload=%@, sync=%@, timing=%@, dimensions=%@)",
+                    i, samePayload ? @"OK" : @"BAD", sameSync ? @"OK" : @"BAD", sameTiming ? @"OK" : @"BAD",
+                    sameDimensions ? @"OK" : @"BAD"];
         }
     }
     CMSampleBufferRef extra = [output copyNextSampleBuffer];
@@ -159,74 +170,132 @@ static NSArray<NSURL *> *Entries(NSURL *directory)
     return files;
 }
 
+static NSString *CheckRecordings(NSURL *directory, NSArray<NSArray<NSData *> *> *payloads,
+                                 const ExpectedGOP *expected)
+{
+    NSArray<NSURL *> *files = Entries(directory);
+    if (files.count != payloads.count) {
+        return [NSString stringWithFormat:@"%@: expected %lu .mov file(s), found %@", directory.lastPathComponent,
+                (unsigned long)payloads.count, [files valueForKey:@"lastPathComponent"]];
+    }
+    // Parts from one session sort in recording order; don't assume a naming template.
+    files = [files sortedArrayUsingComparator:^NSComparisonResult(NSURL *a, NSURL *b) {
+        return [a.lastPathComponent compare:b.lastPathComponent options:NSLiteralSearch];
+    }];
+    for (NSUInteger i = 0; i < files.count; ++i) {
+        NSURL *file = files[i];
+        NSString *problem = [file.pathExtension.lowercaseString isEqualToString:@"mov"]
+            ? CheckRecording(file, payloads[i], &expected[i]) : @"expected a .mov file";
+        if (problem != nil) {
+            return [NSString stringWithFormat:@"%@: %@", file.path, problem];
+        }
+    }
+    return nil;
+}
+
+static NSArray<NSData *> *FeedFixture(NSURL *file, MLH264Recorder *midGOP, MLH264Recorder *preIDROnly,
+                                      MLH264Recorder *lastGOPOnly, CMTime midGOPTimeOffset, ExpectedGOP *expected)
+{
+    NSString *problem = nil;
+    AVAssetReaderTrackOutput *output = nil;
+    AVAssetReader *reader = OpenVideo(file, &output, &problem);
+    Require(reader != nil, problem);
+
+    NSMutableArray<NSData *> *payloads = [NSMutableArray arrayWithCapacity:GOPSize];
+    const int ptsTicks[] = {0, 1, 2, 3, 4, 5, 7, 8};
+    for (int i = 0; i < 2 * GOPSize; ++i) {
+        CMSampleBufferRef sample = [output copyNextSampleBuffer];
+        NSData *payload = sample != NULL ? H264Payload(sample) : nil;
+        Require(payload != nil,
+                [NSString stringWithFormat:@"%@: missing encoded H.264 packet %d", file.lastPathComponent, i]);
+        BOOL keyFrame = IsSync(sample);
+        CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample);
+        Require(keyFrame == (i % GOPSize == 0) && SameTime(pts, CMTimeMake(ptsTicks[i], 25)),
+                [NSString stringWithFormat:@"%@: unexpected key frame flag or PTS at packet %d", file.lastPathComponent, i]);
+        if (i == GOPSize) {
+            expected->dimensions = CMVideoFormatDescriptionGetDimensions(CMSampleBufferGetFormatDescription(sample));
+        }
+        if (i >= GOPSize) {
+            [payloads addObject:payload];
+            expected->timing[i - GOPSize] = (PacketTiming){pts, CMTimeSubtract(DecodeTime(sample), pts),
+                                                           CMSampleBufferGetDuration(sample)};
+            [lastGOPOnly appendSample:sample keyFrame:keyFrame];
+        } else if (i > 0) {
+            [preIDROnly appendSample:sample keyFrame:keyFrame];
+        }
+        if (i > 0) { // Omit the first IDR to emulate starting mid-GOP.
+            if (CMTimeCompare(midGOPTimeOffset, kCMTimeZero) == 0) {
+                [midGOP appendSample:sample keyFrame:keyFrame];
+            } else {
+                CMSampleTimingInfo timing;
+                Require(CMSampleBufferGetSampleTimingInfo(sample, 0, &timing) == noErr,
+                        @"could not read fixture packet timing");
+                timing.presentationTimeStamp = CMTimeAdd(timing.presentationTimeStamp, midGOPTimeOffset);
+                // Leave an omitted DTS alone; the recorder then uses the shifted PTS.
+                if (CMTIME_IS_NUMERIC(timing.decodeTimeStamp)) {
+                    timing.decodeTimeStamp = CMTimeAdd(timing.decodeTimeStamp, midGOPTimeOffset);
+                }
+                CMSampleBufferRef shifted = NULL;
+                Require(CMSampleBufferCreateCopyWithNewTiming(kCFAllocatorDefault, sample, 1, &timing, &shifted) == noErr &&
+                        shifted != NULL, @"could not shift fixture packet timing");
+                [midGOP appendSample:shifted keyFrame:keyFrame];
+                CFRelease(shifted);
+            }
+        }
+        CFRelease(sample);
+    }
+    CMSampleBufferRef extra = [output copyNextSampleBuffer];
+    Require(extra == NULL && reader.status == AVAssetReaderStatusCompleted,
+            [NSString stringWithFormat:@"%@: expected exactly eight readable packets", file.lastPathComponent]);
+    return payloads;
+}
+
 int main(int argc, const char *argv[])
 {
     @autoreleasepool {
-        Require(argc == 4, @"usage: smoke INPUT.mov OUTPUT_DIR NO_IDR_DIR");
+        Require(argc == 6, @"usage: smoke INPUT.mov CHANGED.mov OUTPUT_DIR NO_IDR_DIR ROLLOVER_DIR");
         NSURL *input = [NSURL fileURLWithFileSystemRepresentation:argv[1] isDirectory:NO relativeToURL:nil];
-        NSURL *recordedDir = [NSURL fileURLWithFileSystemRepresentation:argv[2] isDirectory:YES relativeToURL:nil];
-        NSURL *noIDRDir = [NSURL fileURLWithFileSystemRepresentation:argv[3] isDirectory:YES relativeToURL:nil];
-        Require(Entries(recordedDir).count == 0 && Entries(noIDRDir).count == 0,
+        NSURL *changed = [NSURL fileURLWithFileSystemRepresentation:argv[2] isDirectory:NO relativeToURL:nil];
+        NSURL *recordedDir = [NSURL fileURLWithFileSystemRepresentation:argv[3] isDirectory:YES relativeToURL:nil];
+        NSURL *noIDRDir = [NSURL fileURLWithFileSystemRepresentation:argv[4] isDirectory:YES relativeToURL:nil];
+        NSURL *rolloverDir = [NSURL fileURLWithFileSystemRepresentation:argv[5] isDirectory:YES relativeToURL:nil];
+        Require(Entries(recordedDir).count == 0 && Entries(noIDRDir).count == 0 && Entries(rolloverDir).count == 0,
                 @"test output directories must be empty");
-
-        NSString *problem = nil;
-        AVAssetReaderTrackOutput *output = nil;
-        AVAssetReader *reader = OpenVideo(input, &output, &problem);
-        Require(reader != nil, problem);
 
         // Keep the recorders alive through asynchronous finish, even under ARC.
         MLH264Recorder *recorder __attribute__((objc_precise_lifetime)) =
             [[MLH264Recorder alloc] initWithDirectory:recordedDir];
         MLH264Recorder *noIDR __attribute__((objc_precise_lifetime)) =
             [[MLH264Recorder alloc] initWithDirectory:noIDRDir];
-        Require(recorder != nil && noIDR != nil, @"could not initialize recorders");
+        MLH264Recorder *rollover __attribute__((objc_precise_lifetime)) =
+            [[MLH264Recorder alloc] initWithDirectory:rolloverDir];
+        Require(recorder != nil && noIDR != nil && rollover != nil, @"could not initialize recorders");
 
-        NSMutableArray<NSData *> *payloads = [NSMutableArray arrayWithCapacity:GOPSize];
-        PacketTiming expected[GOPSize];
-        const int ptsTicks[] = {0, 1, 2, 3, 4, 5, 7, 8};
-        for (int i = 0; i < 2 * GOPSize; ++i) {
-            CMSampleBufferRef sample = [output copyNextSampleBuffer];
-            NSData *payload = sample != NULL ? H264Payload(sample) : nil;
-            Require(payload != nil,
-                    [NSString stringWithFormat:@"fixture: missing encoded H.264 packet %d", i]);
-            BOOL keyFrame = IsSync(sample);
-            CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample);
-            Require(keyFrame == (i % GOPSize == 0) &&
-                    SameTime(pts, CMTimeMake(ptsTicks[i], 25)),
-                    [NSString stringWithFormat:@"fixture: unexpected key frame flag or PTS at packet %d", i]);
-            if (i >= GOPSize) {
-                [payloads addObject:payload];
-                expected[i - GOPSize] = (PacketTiming){pts, CMTimeSubtract(DecodeTime(sample), pts),
-                                                       CMSampleBufferGetDuration(sample)};
-            }
-            if (i > 0) { // Omit the first IDR to emulate starting mid-GOP.
-                [recorder appendSample:sample keyFrame:keyFrame];
-                if (i < GOPSize) {
-                    [noIDR appendSample:sample keyFrame:keyFrame];
-                }
-            }
-            CFRelease(sample);
-        }
-        CMSampleBufferRef extra = [output copyNextSampleBuffer];
-        Require(extra == NULL && reader.status == AVAssetReaderStatusCompleted,
-                @"fixture: expected exactly eight readable packets");
+        ExpectedGOP expected[3];
+        NSArray<NSData *> *firstGOP = FeedFixture(input, recorder, noIDR, rollover, kCMTimeZero, &expected[0]);
+        // Change formats on a P frame without moving backwards in time.
+        NSArray<NSData *> *secondGOP = FeedFixture(changed, rollover, nil, nil, CMTimeMake(1, 1), &expected[1]);
+        Require(expected[0].dimensions.width != expected[1].dimensions.width ||
+                expected[0].dimensions.height != expected[1].dimensions.height,
+                @"rollover fixtures must have different resolutions");
+        // Replay packets 1..7 as-is: timestamps reset on a P frame, but the format stays the same.
+        NSArray<NSData *> *replayedGOP = FeedFixture(changed, rollover, nil, nil, kCMTimeZero, &expected[2]);
 
         Require(Entries(noIDRDir).count == 0, @"pre-IDR-only input created a file before finish");
         [noIDR finish];
         [recorder finish];
+        [rollover finish];
 
-        // finish has no completion callback. Poll for a fully readable MOV and
+        // finish has no completion callback. Poll for the fully readable MOVs and
         // observe the negative directory for at least two seconds after finish.
+        NSString *problem = nil;
         NSTimeInterval start = NSProcessInfo.processInfo.systemUptime;
         do {
             @autoreleasepool {
                 Require(Entries(noIDRDir).count == 0, @"pre-IDR-only input created a file");
-                NSArray<NSURL *> *files = Entries(recordedDir);
-                if (files.count == 1 && [files.firstObject.pathExtension.lowercaseString isEqualToString:@"mov"]) {
-                    problem = CheckRecording(files.firstObject, payloads, expected);
-                } else {
-                    problem = [NSString stringWithFormat:@"expected exactly one .mov in the output directory, found %@",
-                               [files valueForKey:@"lastPathComponent"]];
+                problem = CheckRecordings(recordedDir, @[firstGOP], expected);
+                if (problem == nil) {
+                    problem = CheckRecordings(rolloverDir, @[firstGOP, secondGOP, replayedGOP], expected);
                 }
                 if (problem == nil && NSProcessInfo.processInfo.systemUptime - start >= 2.0) {
                     break;
@@ -237,7 +306,7 @@ int main(int argc, const char *argv[])
         Require(problem == nil, [NSString stringWithFormat:@"recording did not verify before timeout: %@", problem]);
         Require(Entries(noIDRDir).count == 0, @"pre-IDR-only input created a file");
 
-        puts("PASS: video-only MOV preserved H.264 payloads and timing from the first IDR; pre-IDR-only input produced no file");
+        puts("PASS: IDR gating and both rollover cases preserved H.264 packets and timing; pre-IDR-only input produced no file");
     }
     return 0;
 }

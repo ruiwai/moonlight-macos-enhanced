@@ -2,7 +2,7 @@ name: Build and Release
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, record]
     tags:
       - 'v*'
   pull_request:
@@ -53,6 +53,12 @@ jobs:
 
     - name: Select Xcode 27.0
       run: sudo xcode-select -s /Applications/Xcode_27.0.app/Contents/Developer
+
+    - name: Test H.264 passthrough recording
+      if: matrix.variant == 'arm64'
+      run: |
+        if ! command -v ffmpeg >/dev/null; then brew install ffmpeg; fi
+        tests/h264-recording/run.sh
 
     - name: Show Build Environment
       run: |
