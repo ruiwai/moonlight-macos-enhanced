@@ -61,7 +61,7 @@ jobs:
         bash tests/input-coherence/run.sh -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
           -DCMAKE_C_FLAGS="-I$(brew --prefix openssl@3)/include"
 
-    - name: Test H.264 passthrough recording
+    - name: Test H.264 and HEVC passthrough recording
       if: matrix.variant == 'arm64'
       run: |
         if ! command -v ffmpeg >/dev/null; then brew install ffmpeg; fi

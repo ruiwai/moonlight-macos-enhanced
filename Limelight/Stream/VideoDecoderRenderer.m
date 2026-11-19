@@ -14,7 +14,7 @@
 #import "RendererLayerContainer.h"
 #import "MLFpsMeter.h"
 #import "MLAV1SoftwareDecoder.h"
-#import "MLH264Recorder.h"
+#import "MLCompressedVideoRecorder.h"
 
 #include "Limelight.h"
 #include <math.h>
@@ -1474,7 +1474,7 @@ static BOOL MLGetSharedMetalPipelines(MTLPixelFormat pixelFormat,
     // library calls -stop before it has joined the thread that submits frames, so without this a
     // frame could still be inside VideoToolbox when the session is invalidated.
     NSRecursiveLock *_decodeSubmitLock;
-    MLH264Recorder *_recorder;
+    MLCompressedVideoRecorder *_recorder;
     // Set by -stop under the lock; frames that arrive afterwards are dropped.
     BOOL _decoderStopped;
     NSUInteger _lastLoggedDrawableWidth;
@@ -5559,11 +5559,13 @@ void decompressionOutputCallback(void *decompressionOutputRefCon, void *sourceFr
 
 - (void)start
 {
-    if ((videoFormat & VIDEO_FORMAT_MASK_H264) && [NSUserDefaults.standardUserDefaults boolForKey:@"recordH264Sessions"]) {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if (((videoFormat & VIDEO_FORMAT_MASK_H264) && [defaults boolForKey:@"recordH264Sessions"]) ||
+        ((videoFormat & VIDEO_FORMAT_MASK_H265) && [defaults boolForKey:@"recordHEVCSessions"])) {
         NSURL *movies = [NSFileManager.defaultManager URLsForDirectory:NSMoviesDirectory inDomains:NSUserDomainMask].firstObject;
         if (movies != nil) {
             [_decodeSubmitLock lock];
-            _recorder = [[MLH264Recorder alloc] initWithDirectory:[movies URLByAppendingPathComponent:@"Moonlight" isDirectory:YES]];
+            _recorder = [[MLCompressedVideoRecorder alloc] initWithDirectory:[movies URLByAppendingPathComponent:@"Moonlight" isDirectory:YES]];
             [_decodeSubmitLock unlock];
         }
     }

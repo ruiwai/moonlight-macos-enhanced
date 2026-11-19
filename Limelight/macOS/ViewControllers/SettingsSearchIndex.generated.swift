@@ -55,6 +55,7 @@ extension SettingsSearchIndex {
     SettingsSearchEntry(id: "video/pane", pane: .video, kind: .pane, sectionKey: "Media", titleKey: "Video", detailKey: "Video settings subtitle", keywords: []),
     SettingsSearchEntry(id: "video/Video/Video Codec", pane: .video, kind: .row, sectionKey: "Video", titleKey: "Video Codec", detailKey: nil, keywords: ["H.264", "H.265", "AV1"]),
     SettingsSearchEntry(id: "video/Video/Automatically Record H.264 Sessions", pane: .video, kind: .row, sectionKey: "Video", titleKey: "Automatically Record H.264 Sessions", detailKey: "Automatically Record H.264 Sessions detail", keywords: []),
+    SettingsSearchEntry(id: "video/Video/Automatically Record HEVC Sessions", pane: .video, kind: .row, sectionKey: "Video", titleKey: "Automatically Record HEVC Sessions", detailKey: "Automatically Record HEVC Sessions detail", keywords: []),
     SettingsSearchEntry(id: "video/Video/Renderer Mode", pane: .video, kind: .row, sectionKey: "Video", titleKey: "Renderer Mode", detailKey: nil, keywords: ["Native Renderer (Recommended)", "Metal Renderer", "Compatibility Renderer"]),
     SettingsSearchEntry(id: "video/Video/HDR", pane: .video, kind: .row, sectionKey: "Video", titleKey: "HDR", detailKey: "HDR detail", keywords: []),
     SettingsSearchEntry(id: "video/Video/YUV 4:4:4", pane: .video, kind: .row, sectionKey: "Video", titleKey: "YUV 4:4:4", detailKey: "YUV444 detail", keywords: []),

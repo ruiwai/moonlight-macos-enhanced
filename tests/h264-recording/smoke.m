@@ -3,9 +3,10 @@
 #import <Foundation/Foundation.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #import "Logger.h"
-#import "MLH264Recorder.h"
+#import "MLCompressedVideoRecorder.h"
 
 // Don't link the application's logger (or any of its filesystem behavior).
 void Log(LogLevel level, NSString *format, ...)
@@ -40,7 +41,7 @@ static AVAssetReader *OpenVideo(NSURL *file, AVAssetReaderTrackOutput **output,
 
     NSError *error = nil;
     AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:asset error:&error];
-    // nil output settings keep the original encoded H.264 packets.
+    // nil output settings keep the original compressed packets.
     AVAssetReaderTrackOutput *encoded = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:video
                                                                                   outputSettings:nil];
     if (reader == nil || ![reader canAddOutput:encoded]) {
@@ -122,11 +123,11 @@ static NSArray *ReadPackets(NSURL *file, NSUInteger expected, NSString **problem
     return packets;
 }
 
-static NSData *H264Payload(CMSampleBufferRef sample)
+static NSData *PacketPayload(CMSampleBufferRef sample, OSType expectedCodec)
 {
     CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sample);
     CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample);
-    if (format == NULL || CMFormatDescriptionGetMediaSubType(format) != kCMVideoCodecType_H264 ||
+    if (format == NULL || CMFormatDescriptionGetMediaSubType(format) != expectedCodec ||
         CMSampleBufferGetNumSamples(sample) != 1 || block == NULL) {
         return nil;
     }
@@ -164,7 +165,7 @@ typedef struct {
 } ExpectedGOP;
 
 static NSString *CheckRecording(NSURL *file, NSArray<NSData *> *payloads,
-                                const ExpectedGOP *expected)
+                                const ExpectedGOP *expected, OSType expectedCodec)
 {
     NSString *problem = nil;
     NSArray *packets __attribute__((objc_precise_lifetime)) = ReadPackets(file, GOPSize, &problem);
@@ -175,7 +176,7 @@ static NSString *CheckRecording(NSURL *file, NSArray<NSData *> *payloads,
     CMTime startPTS = kCMTimeInvalid;
     for (int i = 0; i < GOPSize; ++i) {
         CMSampleBufferRef sample = (__bridge CMSampleBufferRef)packets[i];
-        BOOL samePayload = [H264Payload(sample) isEqualToData:payloads[i]];
+        BOOL samePayload = [PacketPayload(sample, expectedCodec) isEqualToData:payloads[i]];
         BOOL sameSync = IsSync(sample) == (i == 0);
         CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sample);
         CMVideoDimensions dimensions = format != NULL ? CMVideoFormatDescriptionGetDimensions(format)
@@ -210,7 +211,7 @@ static NSArray<NSURL *> *Entries(NSURL *directory)
 }
 
 static NSString *CheckRecordings(NSURL *directory, NSArray<NSArray<NSData *> *> *payloads,
-                                 const ExpectedGOP *expected)
+                                 const ExpectedGOP *expected, OSType expectedCodec)
 {
     NSArray<NSURL *> *files = Entries(directory);
     if (files.count != payloads.count) {
@@ -224,7 +225,7 @@ static NSString *CheckRecordings(NSURL *directory, NSArray<NSArray<NSData *> *> 
     for (NSUInteger i = 0; i < files.count; ++i) {
         NSURL *file = files[i];
         NSString *problem = [file.pathExtension.lowercaseString isEqualToString:@"mov"]
-            ? CheckRecording(file, payloads[i], &expected[i]) : @"expected a .mov file";
+            ? CheckRecording(file, payloads[i], &expected[i], expectedCodec) : @"expected a .mov file";
         if (problem != nil) {
             return [NSString stringWithFormat:@"%@: %@", file.path, problem];
         }
@@ -232,8 +233,9 @@ static NSString *CheckRecordings(NSURL *directory, NSArray<NSArray<NSData *> *> 
     return nil;
 }
 
-static NSArray<NSData *> *FeedFixture(NSURL *file, MLH264Recorder *midGOP, MLH264Recorder *preIDROnly,
-                                      MLH264Recorder *lastGOPOnly, CMTime midGOPTimeOffset, ExpectedGOP *expected)
+static NSArray<NSData *> *FeedFixture(NSURL *file, OSType expectedCodec, MLCompressedVideoRecorder *midGOP,
+                                      MLCompressedVideoRecorder *preIDROnly, MLCompressedVideoRecorder *lastGOPOnly,
+                                      CMTime midGOPTimeOffset, ExpectedGOP *expected)
 {
     NSString *problem = nil;
     NSArray *packets __attribute__((objc_precise_lifetime)) = ReadPackets(file, 2 * GOPSize, &problem);
@@ -243,12 +245,13 @@ static NSArray<NSData *> *FeedFixture(NSURL *file, MLH264Recorder *midGOP, MLH26
     const int ptsTicks[] = {0, 1, 2, 3, 4, 5, 7, 8};
     for (int i = 0; i < 2 * GOPSize; ++i) {
         CMSampleBufferRef sample = (__bridge CMSampleBufferRef)packets[i];
-        NSData *payload = H264Payload(sample);
+        NSData *payload = PacketPayload(sample, expectedCodec);
         if (payload == nil) {
             CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sample);
             CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample);
-            Require(NO, [NSString stringWithFormat:@"%@: invalid H.264 packet %d (codec 0x%08x, block bytes %zu, ready %d)",
-                         file.lastPathComponent, i, (unsigned)(format ? CMFormatDescriptionGetMediaSubType(format) : 0),
+            Require(NO, [NSString stringWithFormat:@"%@: invalid packet %d (expected codec 0x%08x, got 0x%08x, block bytes %zu, ready %d)",
+                         file.lastPathComponent, i, (unsigned)expectedCodec,
+                         (unsigned)(format ? CMFormatDescriptionGetMediaSubType(format) : 0),
                          block ? CMBlockBufferGetDataLength(block) : 0, CMSampleBufferDataIsReady(sample)]);
         }
         BOOL keyFrame = IsSync(sample);
@@ -292,33 +295,36 @@ static NSArray<NSData *> *FeedFixture(NSURL *file, MLH264Recorder *midGOP, MLH26
 int main(int argc, const char *argv[])
 {
     @autoreleasepool {
-        Require(argc == 6, @"usage: smoke INPUT.mov CHANGED.mov OUTPUT_DIR NO_IDR_DIR ROLLOVER_DIR");
-        NSURL *input = [NSURL fileURLWithFileSystemRepresentation:argv[1] isDirectory:NO relativeToURL:nil];
-        NSURL *changed = [NSURL fileURLWithFileSystemRepresentation:argv[2] isDirectory:NO relativeToURL:nil];
-        NSURL *recordedDir = [NSURL fileURLWithFileSystemRepresentation:argv[3] isDirectory:YES relativeToURL:nil];
-        NSURL *noIDRDir = [NSURL fileURLWithFileSystemRepresentation:argv[4] isDirectory:YES relativeToURL:nil];
-        NSURL *rolloverDir = [NSURL fileURLWithFileSystemRepresentation:argv[5] isDirectory:YES relativeToURL:nil];
+        Require(argc == 7, @"usage: smoke h264|hevc INPUT.mov CHANGED.mov OUTPUT_DIR NO_IDR_DIR ROLLOVER_DIR");
+        OSType expectedCodec = strcmp(argv[1], "h264") == 0 ? kCMVideoCodecType_H264 :
+                               strcmp(argv[1], "hevc") == 0 ? kCMVideoCodecType_HEVC : 0;
+        Require(expectedCodec != 0, @"expected codec must be h264 or hevc");
+        NSURL *input = [NSURL fileURLWithFileSystemRepresentation:argv[2] isDirectory:NO relativeToURL:nil];
+        NSURL *changed = [NSURL fileURLWithFileSystemRepresentation:argv[3] isDirectory:NO relativeToURL:nil];
+        NSURL *recordedDir = [NSURL fileURLWithFileSystemRepresentation:argv[4] isDirectory:YES relativeToURL:nil];
+        NSURL *noIDRDir = [NSURL fileURLWithFileSystemRepresentation:argv[5] isDirectory:YES relativeToURL:nil];
+        NSURL *rolloverDir = [NSURL fileURLWithFileSystemRepresentation:argv[6] isDirectory:YES relativeToURL:nil];
         Require(Entries(recordedDir).count == 0 && Entries(noIDRDir).count == 0 && Entries(rolloverDir).count == 0,
                 @"test output directories must be empty");
 
         // Keep the recorders alive through asynchronous finish, even under ARC.
-        MLH264Recorder *recorder __attribute__((objc_precise_lifetime)) =
-            [[MLH264Recorder alloc] initWithDirectory:recordedDir];
-        MLH264Recorder *noIDR __attribute__((objc_precise_lifetime)) =
-            [[MLH264Recorder alloc] initWithDirectory:noIDRDir];
-        MLH264Recorder *rollover __attribute__((objc_precise_lifetime)) =
-            [[MLH264Recorder alloc] initWithDirectory:rolloverDir];
+        MLCompressedVideoRecorder *recorder __attribute__((objc_precise_lifetime)) =
+            [[MLCompressedVideoRecorder alloc] initWithDirectory:recordedDir];
+        MLCompressedVideoRecorder *noIDR __attribute__((objc_precise_lifetime)) =
+            [[MLCompressedVideoRecorder alloc] initWithDirectory:noIDRDir];
+        MLCompressedVideoRecorder *rollover __attribute__((objc_precise_lifetime)) =
+            [[MLCompressedVideoRecorder alloc] initWithDirectory:rolloverDir];
         Require(recorder != nil && noIDR != nil && rollover != nil, @"could not initialize recorders");
 
         ExpectedGOP expected[3];
-        NSArray<NSData *> *firstGOP = FeedFixture(input, recorder, noIDR, rollover, kCMTimeZero, &expected[0]);
+        NSArray<NSData *> *firstGOP = FeedFixture(input, expectedCodec, recorder, noIDR, rollover, kCMTimeZero, &expected[0]);
         // Change formats on a P frame without moving backwards in time.
-        NSArray<NSData *> *secondGOP = FeedFixture(changed, rollover, nil, nil, CMTimeMake(1, 1), &expected[1]);
+        NSArray<NSData *> *secondGOP = FeedFixture(changed, expectedCodec, rollover, nil, nil, CMTimeMake(1, 1), &expected[1]);
         Require(expected[0].dimensions.width != expected[1].dimensions.width ||
                 expected[0].dimensions.height != expected[1].dimensions.height,
                 @"rollover fixtures must have different resolutions");
         // Replay packets 1..7 as-is: timestamps reset on a P frame, but the format stays the same.
-        NSArray<NSData *> *replayedGOP = FeedFixture(changed, rollover, nil, nil, kCMTimeZero, &expected[2]);
+        NSArray<NSData *> *replayedGOP = FeedFixture(changed, expectedCodec, rollover, nil, nil, kCMTimeZero, &expected[2]);
 
         Require(Entries(noIDRDir).count == 0, @"pre-IDR-only input created a file before finish");
         [noIDR finish];
@@ -332,9 +338,9 @@ int main(int argc, const char *argv[])
         do {
             @autoreleasepool {
                 Require(Entries(noIDRDir).count == 0, @"pre-IDR-only input created a file");
-                problem = CheckRecordings(recordedDir, @[firstGOP], expected);
+                problem = CheckRecordings(recordedDir, @[firstGOP], expected, expectedCodec);
                 if (problem == nil) {
-                    problem = CheckRecordings(rolloverDir, @[firstGOP, secondGOP, replayedGOP], expected);
+                    problem = CheckRecordings(rolloverDir, @[firstGOP, secondGOP, replayedGOP], expected, expectedCodec);
                 }
                 if (problem == nil && NSProcessInfo.processInfo.systemUptime - start >= 2.0) {
                     break;
@@ -345,7 +351,8 @@ int main(int argc, const char *argv[])
         Require(problem == nil, [NSString stringWithFormat:@"recording did not verify before timeout: %@", problem]);
         Require(Entries(noIDRDir).count == 0, @"pre-IDR-only input created a file");
 
-        puts("PASS: IDR gating and both rollover cases preserved H.264 packets and timing; pre-IDR-only input produced no file");
+        printf("PASS [%s]: IDR gating and both rollover cases preserved packets and timing; pre-IDR-only input produced no file\n",
+               argv[1]);
     }
     return 0;
 }

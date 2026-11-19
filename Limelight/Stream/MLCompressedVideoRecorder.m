@@ -1,9 +1,9 @@
-#import "MLH264Recorder.h"
+#import "MLCompressedVideoRecorder.h"
 #import "Logger.h"
 #import <AVFoundation/AVFoundation.h>
 #include <stdatomic.h>
 
-@implementation MLH264Recorder {
+@implementation MLCompressedVideoRecorder {
     NSURL *_directory;
     dispatch_queue_t _queue;
     dispatch_semaphore_t _slots;
@@ -22,7 +22,7 @@
 - (instancetype)initWithDirectory:(NSURL *)directory {
     if ((self = [super init])) {
         _directory = directory;
-        _queue = dispatch_queue_create("std.skyhua.moonlight.h264-recorder", DISPATCH_QUEUE_SERIAL);
+        _queue = dispatch_queue_create("std.skyhua.moonlight.video-recorder", DISPATCH_QUEUE_SERIAL);
         _slots = dispatch_semaphore_create(32);
         atomic_init(&_closed, NO);
     }
@@ -51,7 +51,7 @@
     _input.expectsMediaDataInRealTime = YES;
     _input.mediaTimeScale = CMSampleBufferGetPresentationTimeStamp(sample).timescale;
     if (![_writer canAddInput:_input]) {
-        Log(LOG_W, @"[recording] Cannot open H.264 track at %@: %@", url.path, error ?: _writer.error);
+        Log(LOG_W, @"[recording] Cannot open video track at %@: %@", url.path, error ?: _writer.error);
         return NO;
     }
     [_writer addInput:_input];
@@ -61,7 +61,8 @@
         return NO;
     }
     [_writer startSessionAtSourceTime:CMSampleBufferGetPresentationTimeStamp(sample)];
-    Log(LOG_I, @"[recording] Writing H.264 video to %@", url.path);
+    Log(LOG_I, @"[recording] Writing %@ video to %@",
+        CMFormatDescriptionGetMediaSubType(_input.sourceFormatHint) == kCMVideoCodecType_H264 ? @"H.264" : @"HEVC", url.path);
     return YES;
 }
 
@@ -92,7 +93,7 @@
                       CMTimeCompare(decodeTime, _lastDecodeTime) < 0;
     if (_input && (clockReset || !CMFormatDescriptionEqual(_input.sourceFormatHint, CMSampleBufferGetFormatDescription(sample)))) {
         Log(LOG_I, @"[recording] %@; starting a new part at the next keyframe",
-            clockReset ? @"Video timestamp moved backwards" : @"H.264 format changed");
+            clockReset ? @"Video timestamp moved backwards" : @"Video format changed");
         [self closeWriter];
     }
     if (_input == nil) {
