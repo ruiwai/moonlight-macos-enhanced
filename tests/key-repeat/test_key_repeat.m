@@ -207,6 +207,15 @@ static void checkHold(TestKey key, NSEventModifierFlags flags, BOOL equivalent, 
         sequence);
 }
 
+static void checkTapRepeat(TestKey key, NSEventModifierFlags flags) {
+  StreamViewController *controller = stream();
+  BOOL handled = [controller onKeyboardEquivalent:keyEvent(key, NSEventTypeKeyDown, flags, NO)];
+  BOOL tapped = [controller.hidSupport.sequence isEqualToString:@"du"];
+  handled &= [controller onKeyboardEquivalent:keyEvent(key, NSEventTypeKeyDown, flags, YES)];
+  check(key.name, handled && tapped && [controller.hidSupport.sequence isEqualToString:@"du"],
+        controller.hidSupport.sequence);
+}
+
 int main(void) {
   @autoreleasepool {
     const TestKey functionKeys[] = {
@@ -248,11 +257,9 @@ int main(void) {
                                               NSEventModifierFlagCapsLock, NO)];
     check("Synthetic Caps Lock tap", [controller.hidSupport.sequence isEqualToString:@"du"],
           controller.hidSupport.sequence);
-    controller = stream();
-    [controller onKeyboardEquivalent:keyEvent((TestKey){"Fn+A", kVK_ANSI_A, 'a'}, NSEventTypeKeyDown,
-                                              NSEventModifierFlagFunction, NO)];
-    check("Fn with printable key retains equivalent tap", [controller.hidSupport.sequence isEqualToString:@"du"],
-          controller.hidSupport.sequence);
+    checkTapRepeat((TestKey){"Plain equivalent repeat sends neither edge", kVK_ANSI_A, 'a'}, 0);
+    checkTapRepeat((TestKey){"Fn+printable equivalent repeat sends neither edge", kVK_ANSI_A, 'a'},
+                   NSEventModifierFlagFunction);
 
     KeyboardTranslationRule *rule = [KeyboardTranslationRule new];
     rule.trigger = [StreamShortcut new];

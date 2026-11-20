@@ -2988,13 +2988,18 @@ static inline NSPoint MLClampFreeMousePointToExitEdge(NSPoint point,
     }
     
     [self resolveDeferredCommandModifierWithoutRemoteTapWithReason:@"keyboard-equivalent-pass-through" event:event];
-    [self.hidSupport keyDown:event];
     // This key equivalent handles a down (macos-apple-nsresponder-equivalent-20261120,
     // Discussion). HIDSupport reuses the held mapping for function/navigation key repeats
     // (macos-apple-nsevent-repeat-20261120, Discussion).
     BOOL windowsKeyOrder = [SettingsClass keyboardCompatibilityModeFor:self.app.host.uuid] ==
         KeyboardCompatibilityModeSwapOptionAndCommand;
     MLPassThroughPlan plan = MLPassThroughPlanForKeyEquivalent(event, windowsKeyOrder);
+    // The original tap already sent both edges. Consume its repeats rather than
+    // pairing a repeat down that HIDSupport ignores with another synthetic up.
+    if (plan.keyUpNow && event.isARepeat) {
+        return YES;
+    }
+    [self.hidSupport keyDown:event];
     if (plan.keyUpNow) {
         [self.hidSupport keyUp:event];
     } else if (plan.holdUntilKeyUp && self.hidSupport.shouldSendInputEvents) {
