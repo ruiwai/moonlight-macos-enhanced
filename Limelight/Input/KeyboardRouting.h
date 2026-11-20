@@ -173,20 +173,20 @@ static inline MLPassThroughPlan MLPassThroughChordPlan(bool controlHeld, bool co
 // function-key Unicode range. Check both so Fn with a printable key still
 // follows the ordinary shortcut policy (macos-apple-nsevent-function-20261120
 // and macos-apple-function-key-unicode-20261120, Discussion).
+static inline bool MLIsFunctionKeyEvent(NSEvent *event) {
+  if (!(event.modifierFlags & NSEventModifierFlagFunction)) return false;
+  NSString *characters = event.charactersIgnoringModifiers;
+  if (characters.length != 1) return false;
+  unichar character = [characters characterAtIndex:0];
+  return character >= NSUpArrowFunctionKey && character <= 0xF8FF;
+}
+
 static inline MLPassThroughPlan MLPassThroughPlanForKeyEquivalent(NSEvent *event, bool windowsKeyOrder) {
   // See macos-apple-nsevent-modifiers-20261120 and
   // macos-apple-nsevent-unmodified-characters-20261120 (Discussion).
   NSEventModifierFlags flags = event.modifierFlags;
-  BOOL functionKey = NO;
-  if (flags & NSEventModifierFlagFunction) {
-    NSString *characters = event.charactersIgnoringModifiers;
-    if (characters.length == 1) {
-      unichar character = [characters characterAtIndex:0];
-      functionKey = character >= NSUpArrowFunctionKey && character <= 0xF8FF;
-    }
-  }
   return MLPassThroughChordPlan((flags & NSEventModifierFlagControl) != 0, (flags & NSEventModifierFlagCommand) != 0,
-                                windowsKeyOrder, functionKey);
+                                windowsKeyOrder, MLIsFunctionKeyEvent(event));
 }
 #endif
 

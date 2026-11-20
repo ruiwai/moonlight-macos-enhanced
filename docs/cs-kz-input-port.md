@@ -6,6 +6,8 @@ queue instead of waiting for a display tick. Conversion preserves fractional mot
 controller mouse emulation still uses the display link. AppKit provides both wheel
 axes, with separate handling for discrete clicks and smooth deltas. Ordinary held
 keys track the mapping of the successfully enqueued press, not the current layout.
+Function and navigation keys forward AppKit repeats using that held mapping;
+ordinary gameplay keys still send only the physical press and release.
 
 `moonlight-common/cs-kz-input.patch` adapts Common `77bd732` to `record`'s
 `74d0e9f` pin. The worker combines compatible adjacent motion, splits on horizontal
@@ -23,6 +25,6 @@ other translation units remain unchanged. Rebase the patch when updating Common.
 With Common and ENet initialized, run `bash tests/input-coherence/run.sh` (CMake,
 C11 compiler, Python 3, OpenSSL development headers). On macOS with Homebrew,
 use the OpenSSL flags in `.github/workflows/build.yml`. This also checks the Xcode
-source generator against a fully patched Common tree. Foundation fixtures require
+source generator against a fully patched Common tree. AppKit and Foundation fixtures require
 macOS; portable tests aren't a substitute for capture/recapture and high-polling
 mouse tests on a live CS/KZ host.

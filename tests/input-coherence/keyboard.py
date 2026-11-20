@@ -1,4 +1,4 @@
-"""Extract production keyboard methods; execute a queued Foundation fake on macOS only."""
+"""Exercise production HID methods with AppKit key events and a queued fake transport on macOS."""
 from pathlib import Path
 import argparse
 import subprocess
@@ -30,7 +30,7 @@ for method, limit in zip(methods, (70, 70, 60)):
 helpers = '\n'.join(extract(s) for s in ('static inline uint32_t HIDPackKeyPair(',
                                       'static inline short HIDKeyPairKeyCode(',
                                       'static inline char HIDKeyPairFlags('))
-program = r'''#import <Foundation/Foundation.h>
+program = r'''#import "KeyboardRouting.h"
 #include <assert.h>
 typedef void *PML_INPUT_STREAM_CONTEXT;
 enum { KEY_ACTION_DOWN = 3, KEY_ACTION_UP = 4, LOG_W = 2 };
@@ -38,12 +38,12 @@ static NSMutableArray *pending, *calls, *outcomes, *modifierCalls;
 static NSLock *heldLock;
 static BOOL running;
 static int logs, modifierSyncs, mappings;
-@interface NSEvent : NSObject
-@property unsigned short keyCode;
-@property BOOL isARepeat;
-@end
-@implementation NSEvent
-@end
+static NSEvent *key(unsigned short code, unichar character, NSEventModifierFlags flags, BOOL repeat) {
+    NSString *text = [NSString stringWithCharacters:&character length:1];
+    return [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:flags timestamp:0
+                        windowNumber:0 context:nil characters:text charactersIgnoringModifiers:text
+                           isARepeat:repeat keyCode:code];
+}
 @interface Fixture : NSObject {
 @public
     NSMutableDictionary<NSNumber *, NSNumber *> *_pressedKeyPairs;
@@ -113,7 +113,7 @@ static void held(Fixture *f, NSNumber *key, uint32_t pair) {
 int main(void) { @autoreleasepool {
     pending = [NSMutableArray array];
     uint32_t a = HIDPackKeyPair((short)0x8041, 1), b = HIDPackKeyPair((short)0x8042, 0);
-    NSEvent *e = [NSEvent new]; e.keyCode = 12;
+    NSEvent *e = key(12, 'q', 0, NO);
     Fixture *f = fresh(); f.mappedPair = a;
     [outcomes addObject:@(-1)]; [f keyDown:e]; assert(!f->_pressedKeyPairs.count && !calls.count);
     step(); assert(!f->_pressedKeyPairs.count && logs == 1); expect(0, a, 3, 5, -1);
@@ -135,12 +135,27 @@ int main(void) { @autoreleasepool {
     puts("PASS: changed pair aborts on failed release; successful release + failed/new down coherence");
 
     f = fresh(); f.mappedPair = a; [f keyDown:e]; step(); f.mappedPair = b;
-    e.isARepeat = YES; [f keyDown:e]; [f keyDown:e];
+    [f keyDown:key(12, 'q', 0, YES)]; [f keyDown:key(12, 'q', NSEventModifierFlagFunction, YES)];
     assert(!pending.count && calls.count == 1 && modifierSyncs == 1 && mappings == 1);
-    held(f, @12, a); e.isARepeat = NO; assert(logs == 0);
-    f = fresh(); e.isARepeat = YES; [f keyDown:e]; e.isARepeat = NO;
-    assert(!pending.count && !calls.count && !modifierSyncs && !mappings && !f->_pressedKeyPairs.count);
-    puts("PASS: repeats with/without a held key are ignored before mapping/modifier processing");
+    held(f, @12, a); assert(logs == 0);
+    puts("PASS: ordinary and Fn+printable repeats are ignored before mapping/modifier processing");
+
+    for (NSNumber *ch in @[@(NSF1FunctionKey), @(NSUpArrowFunctionKey)]) {
+        unsigned short code = ch.unsignedShortValue == NSF1FunctionKey ? 122 : 126;
+        NSEvent *down = key(code, ch.unsignedShortValue, NSEventModifierFlagFunction, NO);
+        NSEvent *repeat = key(code, ch.unsignedShortValue, NSEventModifierFlagFunction, YES);
+        f = fresh(); f.mappedPair = a; [f keyDown:down]; f.mappedPair = b;
+        [f keyDown:repeat]; [f keyDown:repeat]; [f keyUp:down]; [f keyDown:repeat];
+        assert(pending.count == 5 && !calls.count && mappings == 2);
+        [outcomes addObjectsFromArray:@[@0, @(-1), @0, @0]];
+        step(); expect(0, a, 3, 5, 0); step(); expect(1, a, 3, 5, -1); held(f, @(code), a);
+        step(); expect(2, a, 3, 5, 0); step(); expect(3, a, 4, 5, 0); step();
+        assert(calls.count == 4 && !f->_pressedKeyPairs.count && logs == 1);
+
+        f = fresh(); f.mappedPair = a; [outcomes addObject:@(-1)]; [f keyDown:down]; [f keyDown:repeat];
+        step(); step(); assert(calls.count == 1 && !f->_pressedKeyPairs.count);
+    }
+    puts("PASS: F-key and arrow repeats reuse a successful down's pair; orphan repeats send nothing");
 
     f = fresh(); f.mappedPair = a; [f keyDown:e]; step();
     [outcomes addObject:@(-4)]; [f keyUp:e]; step(); held(f, @12, a);
@@ -155,7 +170,7 @@ int main(void) { @autoreleasepool {
     puts("PASS: failed up/cleanup remain retryable; explicit modifier releases unchanged");
 
     f = fresh(); f.mappedPair = a; [f keyDown:e]; step();
-    e.keyCode = 13; f.mappedPair = b; [f keyDown:e]; step(); e.keyCode = 12;
+    f.mappedPair = b; [f keyDown:key(13, 'w', 0, NO)]; step();
     [outcomes addObjectsFromArray:@[@(-4), @0]]; [f releaseAllModifierKeys]; step();
     assert(f->_pressedKeyPairs.count == 1 && logs == 1 && calls.count == 4);
     uint32_t retained = HIDPackKeyPair([calls[2][0] shortValue], [calls[2][3] unsignedCharValue]);
@@ -187,11 +202,12 @@ if args.emit:
     args.emit.write_text(program)
 print('PASS: production method/helper extraction and LOC/queue guards (not runtime)', flush=True)
 if sys.platform != 'darwin':
-    print('SKIP: keyboard runtime fixture requires macOS Foundation; not executed on ' + sys.platform)
+    print('SKIP: keyboard runtime fixture requires macOS AppKit; not executed on ' + sys.platform)
     sys.exit(0)
 with tempfile.TemporaryDirectory(prefix='keyboard-coherence-') as tmp:
     path = Path(tmp)
     (path / 'keyboard.m').write_text(program)
-    subprocess.run(['clang', '-fobjc-arc', '-fblocks', '-Wall', '-Werror', '-framework', 'Foundation',
+    subprocess.run(['clang', '-fobjc-arc', '-fblocks', '-Wall', '-Werror', '-framework', 'AppKit',
+                    '-I', str(root / 'Limelight/Input'),
                     str(path / 'keyboard.m'), '-o', str(path / 'keyboard')], check=True, timeout=60)
     subprocess.run([str(path / 'keyboard')], check=True, timeout=30)

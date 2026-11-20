@@ -137,6 +137,5 @@ for signature in ('- (void)keyDown:', '- (void)keyUp:', '- (void)releaseAllModif
     assert '[_pressedKeyPairsLock lock]' in queued
     assert 'LiSendKeyboardEvent2Ctx' in queued and 'if (err == 0)' in queued
 down = body(core, '- (void)keyDown:')
-assert down.index('if (event.isARepeat) return;') < down.index('self.shouldSendInputEvents')
-assert down.index('if (event.isARepeat) return;') < down.index('syncKeyboardModifierStateForEvent')
+assert down.index('if (repeat && !MLIsFunctionKeyEvent(event)) return;') < down.index('syncKeyboardModifierStateForEvent')
 print('PASS: static tracked keyboard state remains queued and success-guarded (not runtime)')

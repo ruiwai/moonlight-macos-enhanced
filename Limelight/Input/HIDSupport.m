@@ -1240,7 +1240,8 @@ static unsigned short HIDPositionalKeyCode(unsigned short macKeyCode) {
 }
 
 - (void)keyDown:(NSEvent *)event {
-    if (event.isARepeat) return;
+    BOOL repeat = event.isARepeat;
+    if (repeat && !MLIsFunctionKeyEvent(event)) return;
     if (self.shouldSendInputEvents) {
         [self syncKeyboardModifierStateForEvent:event];
         char modifiers = [self translateKeyModifierWithEvent:event];
@@ -1250,12 +1251,17 @@ static unsigned short HIDPositionalKeyCode(unsigned short macKeyCode) {
         }
 
         NSNumber *macKey = @(event.keyCode);
-        uint32_t mappedPair = [self keyPairForMacKeyCode:event.keyCode];
+        uint32_t mappedPair = repeat ? 0 : [self keyPairForMacKeyCode:event.keyCode];
         HIDDispatchInput(self, inputCtx, ^{
             [_pressedKeyPairsLock lock];
             NSNumber *held = _pressedKeyPairs[macKey];
-            uint32_t pair = mappedPair;
-            if (held != nil && held.unsignedIntValue != pair) {
+            // A repeat may follow a rejected down or cleanup. Never use it to start a press.
+            if (repeat && held == nil) {
+                [_pressedKeyPairsLock unlock];
+                return;
+            }
+            uint32_t pair = repeat ? held.unsignedIntValue : mappedPair;
+            if (!repeat && held != nil && held.unsignedIntValue != pair) {
                 uint32_t previousPair = held.unsignedIntValue;
                 int err = LiSendKeyboardEvent2Ctx(inputCtx, HIDKeyPairKeyCode(previousPair), KEY_ACTION_UP, 0,
                                                   HIDKeyPairFlags(previousPair));
