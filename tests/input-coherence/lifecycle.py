@@ -51,13 +51,15 @@ program = r'''#import <Foundation/Foundation.h>
 #include <string.h>
 #include "HIDRelativeMotionPolicy.h"
 #include "HIDMouseWheelPolicy.h"
+#include "CoreHIDSilence.h"
 #define Log(...) ((void)0)
 typedef void *PML_INPUT_STREAM_CONTEXT;
 typedef NSUInteger NSEventPhase;
 typedef NSInteger MLPrecisionTouchpadMode;
 enum { MLPrecisionTouchpadModeOff, MLPrecisionTouchpadModeBlock, MLPrecisionTouchpadModeBoth };
 static uint64_t now = 1000;
-static BOOL absolute;
+static NSString *mouseMode;
+static BOOL hybridFreeMouse;
 static NSInteger storedMode;
 static NSMutableArray *pending, *packets;
 @interface NSEvent : NSObject
@@ -91,6 +93,8 @@ static NSMutableArray *pending, *packets;
 - (void)reset { self.active=NO; self.until=0; }
 @end
 @interface SettingsClass : NSObject
++ (NSString *)mouseModeFor:(NSString *)uuid;
++ (BOOL)shouldUseHybridFreeMouseMotionFor:(NSString *)uuid;
 + (NSInteger)touchscreenModeFor:(NSString *)uuid;
 + (NSInteger)hostPrecisionTouchpadModeFor:(NSString *)uuid;
 + (BOOL)reverseScrollDirectionFor:(NSString *)uuid;
@@ -98,6 +102,8 @@ static NSMutableArray *pending, *packets;
 + (void)updateScrollInputRuntimeStatusFor:(NSString *)uuid summaryKey:(NSString *)s detailKey:(NSString *)d;
 @end
 @implementation SettingsClass
++ (NSString *)mouseModeFor:(NSString *)uuid { return mouseMode; }
++ (BOOL)shouldUseHybridFreeMouseMotionFor:(NSString *)uuid { return hybridFreeMouse; }
 + (NSInteger)touchscreenModeFor:(NSString *)uuid { return 0; }
 + (NSInteger)hostPrecisionTouchpadModeFor:(NSString *)uuid { return storedMode; }
 + (BOOL)reverseScrollDirectionFor:(NSString *)uuid { return NO; }
@@ -105,6 +111,7 @@ static NSMutableArray *pending, *packets;
 + (void)updateScrollInputRuntimeStatusFor:(NSString *)u summaryKey:(NSString *)s detailKey:(NSString *)d {}
 @end
 @interface Fixture : NSObject { @public
+    MLCoreHIDSilence _coreHIDSilence;
 ''' + ivars + r'''}
 @property BOOL shouldSendInputEvents, useGCMouse, useCoreHIDMouse;
 @property void *inputContext;
@@ -113,6 +120,12 @@ static NSMutableArray *pending, *packets;
 @property(strong) Fixture *coreHIDMouseDriver;
 @property double secondsSinceLastMovementEvent;
 @property BOOL hasRecentCoreHIDMouseMovement;
+@property BOOL coreHIDMouseRuntimeFailed;
+@property(strong) NSObject *freeMouseVirtualCursorLock;
+- (MLCoreHIDSilence *)coreHIDSilenceState;
+- (BOOL)hasRecentCoreHIDMouseMovementForAppKitEvent:(NSEvent *)event;
+- (void)markCoreHIDMouseSilent;
+- (void)updateFreeMouseVirtualCursorAnchorWithViewPoint:(NSPoint)point referenceSize:(NSSize)size;
 @property HIDWheelState wheelState;
 @property uint64_t wheelQueueEpoch;
 ''' + '\n'.join(m.split('{', 1)[0] + ';' for m in methods) + '\n' + ';\n'.join(diag) + ';\n@end\n'
@@ -120,11 +133,11 @@ program += r'''
 static void HIDDispatchInput(Fixture *f, void *ctx, void (^work)(void)) { [pending addObject:[work copy]]; }
 static void *HIDInputContext(Fixture *f) { return f.inputContext; }
 static BOOL HIDValidateInputContext(void *ctx, const char *tag) { return ctx != NULL; }
-static BOOL HIDShouldUseAbsolutePointerPath(Fixture *f, NSInteger mode) { return absolute; }
-static BOOL HIDShouldUseCoreHIDFreeMouseAbsoluteSync(Fixture *f) { return f.useCoreHIDMouse; }
+typedef Fixture HIDSupport;
 static BOOL HIDShouldSuppressRelativeMouse(Fixture *f) { return NO; }
 static CGFloat HIDPointerSensitivityForHost(Host *host) { return 1; }
 static uint64_t LiGetMillis(void) { return now; }
+static BOOL HIDAbsoluteMouseReferenceForEvent(NSEvent *e, NSPoint *point, NSSize *size) { *point=NSMakePoint(1,1); *size=NSMakeSize(2,2); return YES; }
 static BOOL HIDAbsoluteMousePayloadForEvent(NSEvent *e, BOOL clamp, short *x, short *y, short *w, short *h) { *x=*y=*w=*h=1; return YES; }
 static int LiSendMouseMoveEventCtx(void *ctx, short x, short y) { [packets addObject:@[@"motion", @(x), @(y)]]; return 0; }
 static void LiSendMousePositionEventCtx(void *ctx, short x, short y, short w, short h) { [packets addObject:@[@"absolute"]]; }
@@ -135,27 +148,40 @@ WHEEL_STUB(LiSendHScrollEventCtx, signed char)
 WHEEL_STUB(LiSendScrollEventCtx, signed char)
 static void LiNoteScrollTraceLocalDispatchCtx(void *ctx, uint64_t t, uint64_t d, short n, BOOL s, BOOL h) {}
 '''
+for helper in ('HIDShouldUseHybridFreeMouseMotion', 'HIDShouldUseCoreHIDFreeMouseAbsoluteSync', 'HIDShouldUseAbsolutePointerPath'):
+    program += extract(internal, 'static inline BOOL ' + helper + '(') + '\n'
 program += 'typedef int (^HIDRelativeChunkSender)(int16_t, int16_t);\n' + extract(core, 'static int HIDSendRelativeChunk(')
 program += '\n' + scroll[scroll.index('typedef int (^HIDWheelSubmitter)'):scroll.index('@implementation')]
-program += '@implementation Fixture\n' + '\n'.join(d + (' { return 0; }' if d.startswith('- (uint64_t)') else ' {}') for d in diag)
+program += r'''@implementation Fixture
+- (MLCoreHIDSilence *)coreHIDSilenceState { return &_coreHIDSilence; }
+- (BOOL)hasRecentCoreHIDMouseMovementForAppKitEvent:(NSEvent *)event { return self.hasRecentCoreHIDMouseMovement; }
+- (void)markCoreHIDMouseSilent { self.coreHIDMouseRuntimeFailed=YES; }
+- (void)updateFreeMouseVirtualCursorAnchorWithViewPoint:(NSPoint)point referenceSize:(NSSize)size {}
+''' + '\n'.join(d + (' { return 0; }' if d.startswith('- (uint64_t)') else ' {}') for d in diag)
 program += '\n' + '\n'.join(methods) + '\n@end\n' + r'''
 static void drain(void) { while (pending.count) { void (^b)(void)=pending[0]; [pending removeObjectAtIndex:0]; b(); } }
 static Fixture *fresh(void) {
- pending=[NSMutableArray array]; packets=[NSMutableArray array]; absolute=NO; now=1000; storedMode=0;
+ pending=[NSMutableArray array]; packets=[NSMutableArray array]; now=1000; storedMode=0;
+ mouseMode=@"game"; hybridFreeMouse=NO;
  Fixture *f=[Fixture new]; f.shouldSendInputEvents=YES; f.inputContext=(void *)1;
+ f.freeMouseVirtualCursorLock=[NSObject new];
  f.precisionTouchpad=[Pad new]; f.host=[Host new]; f.host.uuid=@"fixture"; return f;
 }
 static void move(Fixture *f, double x) { [f dispatchRelativeMouseDeltaX:x deltaY:0 sourceTag:@"mouseMoved"]; }
 int main(void) { @autoreleasepool {
  Fixture *f=fresh(); NSEvent *e=[NSEvent new]; e.hasPreciseScrollingDeltas=YES; e.deltaY=.75;
- [f scrollWheel:e]; uint64_t wheel=[f inputWheelEpoch]; absolute=YES; [f mouseMoved:e]; drain();
+ mouseMode=@"remote";
+ [f scrollWheel:e]; uint64_t wheel=[f inputWheelEpoch]; [f mouseMoved:e]; drain();
  assert(packets.count==2 && [packets[0][1] intValue]==90 && f.wheelState.y==.75f && wheel==[f inputWheelEpoch]);
  e.deltaY=.25; [f scrollWheel:e]; [f mouseMoved:e]; drain(); assert(f.wheelState.y==0 && [packets[2][1] intValue]==30);
  puts("PASS: queued wheel survives ordinary absolute motion; fractional SDL continuity survives too");
  f.useCoreHIDMouse=YES; f.hasRecentCoreHIDMouseMovement=YES;
- NSUInteger before=packets.count; [f mouseMoved:e]; drain(); assert(packets.count==before);
+ NSUInteger before=packets.count; [f mouseMoved:e]; drain();
+ assert(packets.count==before+1 && [packets[before][0] isEqual:@"absolute"]);
+ hybridFreeMouse=YES; before=packets.count; [f mouseMoved:e]; drain(); assert(packets.count==before);
  f.hasRecentCoreHIDMouseMovement=NO; [f mouseMoved:e]; drain(); assert(packets.count==before+1);
- puts("PASS: free mouse skips only the recent CoreHID duplicate of an absolute AppKit move");
+ assert([packets[before][0] isEqual:@"absolute"]);
+ puts("PASS: only hybrid free mouse skips recent CoreHID duplicates; non-recent AppKit moves send one absolute position");
  f=fresh(); move(f,.75); drain(); assert(f->_relativeMotionResiduals[2].x==.75); move(f,.5);
  e.touchState=1; [f handleTrackpadTouchesEvent:e inView:nil]; drain(); assert(!packets.count);
  e.touchState=2; [f handleTrackpadTouchesEvent:e inView:nil]; now+=101; move(f,.25); drain();
